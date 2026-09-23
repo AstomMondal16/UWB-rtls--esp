@@ -1,0 +1,209 @@
+menu "UWB ranging"
+
+choice UWB_ROLE
+    prompt "Device role"
+    default UWB_ROLE_TAG
+
+    config UWB_ROLE_TAG
+        bool "Tag"
+
+    config UWB_ROLE_ANCHOR
+        bool "Anchor"
+endchoice
+
+config UWB_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config UWB_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+
+menu "DW1000 GPIO pins"
+
+config UWB_DW1000_SCK_GPIO
+    int "SCK GPIO"
+    range 0 48
+    default 5
+
+config UWB_DW1000_MISO_GPIO
+    int "MISO GPIO"
+    range 0 48
+    default 6
+
+config UWB_DW1000_MOSI_GPIO
+    int "MOSI GPIO"
+    range 0 48
+    default 7
+
+config UWB_DW1000_CS_GPIO
+    int "CS GPIO"
+    range 0 48
+    default 15
+
+config UWB_DW1000_IRQ_GPIO
+    int "IRQ GPIO"
+    range 0 48
+    default 4
+
+config UWB_DW1000_RST_GPIO
+    int "RST GPIO"
+    range 0 48
+    default 16
+
+config UWB_DW1000_ACTIVITY_LEDS
+    bool "Enable BU01 RXLED/TXLED activity outputs"
+    default y
+    help
+        Use DW1000 GPIO2/RXLED and GPIO3/TXLED as automatic radio activity
+        outputs. Both LEDs blink once during startup, then RXLED indicates
+        receive activity and TXLED indicates completed transmissions.
+        External LEDs require suitable series resistors.
+
+endmenu
+
+config UWB_PAN_ID
+    hex "UWB PAN ID"
+    range 0x0000 0xffff
+    default 0xdeca
+
+config UWB_CIR_ENABLE
+    bool "Enable DW1000 channel impulse response (CIR) capture"
+    default n
+    help
+        Capture raw signed I/Q samples after a completed ranging exchange.
+        Read the latest local receiver snapshot from HTTP GET /api/cir.
+        Disabled builds perform no accumulator reads and allocate no CIR buffer.
+
+if UWB_CIR_ENABLE
+
+config UWB_CIR_SAMPLES
+    int "CIR samples per capture"
+    range 32 1016
+    default 64
+    help
+        Window starts up to 16 samples before the detected first path and is
+        clamped to accumulator boundaries. Select 1016 for the full CIR.
+        At 2 MHz SPI, 64 samples take at least 1 ms; 1016 take at least 16 ms.
+        Capture follows the reply, but can delay listening for the next packet.
+
+config UWB_CIR_INTERVAL_MS
+    int "Minimum CIR capture interval (milliseconds)"
+    range 0 60000
+    default 100
+    help
+        Capture the next completed exchange after this interval. Zero captures
+        every completed exchange. This limit is per device, not per peer.
+        The actual capture rate also depends on successful ranging exchanges.
+
+endif
+
+config UWB_ANTENNA_DELAY
+    int "DW1000 antenna delay (device time units)"
+    range 0 65535
+    default 16384
+    help
+        Calibrate this for the antenna and PCB. Both TX_ANTD and LDE_RXANTD
+        receive this value.
+
+config UWB_REPLY_DELAY_US
+    int "Ranging reply delay (microseconds)"
+    range 2000 20000
+    default 7000
+    help
+        The Arduino DW1000Ranging protocol default is 7000 us.
+
+config UWB_TAG_PERIOD_MS
+    int "Tag ranging period (milliseconds)"
+    range 20 60000
+    default 80
+    help
+        The Arduino DW1000Ranging default timer period is 80 ms.
+
+config UWB_SPEED_DEADBAND_MM_S
+    int "Stationary speed dead-band (millimetres/second)"
+    range 0 1000
+    default 80
+    help
+        Report radial speed as zero below this value. This removes apparent
+        motion caused by normal DW1000 distance jitter while stationary.
+
+config UWB_TELEMETRY_BUFFER_LENGTH
+    int "Sensor-to-Wi-Fi buffer length (samples)"
+    range 4 256
+    default 32
+    help
+        Number of complete UWB/IMU/battery samples buffered between the
+        sensing and Wi-Fi tasks. When full, the oldest sample is discarded so
+        ranging is never blocked by network activity.
+
+config UWB_TELEMETRY_SEND_INTERVAL_MS
+    int "Dashboard network interval (milliseconds)"
+    range 50 60000
+    default 50
+    help
+        Initial delay between dashboard telemetry requests. It can be changed
+        at runtime from the dashboard.
+
+config UWB_BATTERY_MONITOR_ENABLE
+    bool "Enable battery voltage monitoring"
+    default y if IDF_TARGET_ESP32S3
+    default n
+    help
+        Measure the battery through the 39k/100k divider. Use an ADC1-capable
+        pin so it remains available while Wi-Fi is active.
+
+if UWB_BATTERY_MONITOR_ENABLE
+
+config UWB_BATTERY_ADC_GPIO
+    int "Battery divider ADC GPIO"
+    range 1 10 if IDF_TARGET_ESP32S3
+    range 0 4 if IDF_TARGET_ESP32C3
+    range 0 48
+    default 1
+    help
+        ESP32-S3 ADC1 is GPIO1 through GPIO10; GPIO39 is not analog-capable.
+        ESP32-C3 ADC1 is GPIO0 through GPIO4.
+
+config UWB_BATTERY_EMPTY_MV
+    int "Battery voltage at 0 percent (millivolts)"
+    range 2000 5000
+    default 3000
+
+config UWB_BATTERY_FULL_MV
+    int "Battery voltage at 100 percent (millivolts)"
+    range 2000 5000
+    default 4200
+
+endif
+
+config UWB_MPU6050_ENABLE
+    bool "Enable MPU6050 IMU sensor"
+    default y if UWB_ROLE_TAG
+    default n if UWB_ROLE_ANCHOR
+    help
+        Enable MPU6050 initialization, calibration, and accelerometer/gyroscope
+        readings in each successful UWB range log. Disable this when no IMU is
+        connected; UWB ranging will continue without IMU data.
+
+if UWB_MPU6050_ENABLE
+
+menu "MPU6050 GPIO pins"
+
+config UWB_MPU6050_SDA_GPIO
+    int "MPU6050 SDA GPIO"
+    range 0 48
+    default 47 if IDF_TARGET_ESP32S3
+    default 0
+
+config UWB_MPU6050_SCL_GPIO
+    int "MPU6050 SCL GPIO"
+    range 0 48
+    default 48 if IDF_TARGET_ESP32S3
+    default 1
+
+endmenu
+
+endif
+
+endmenu
