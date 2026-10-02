@@ -37,6 +37,9 @@ typedef struct {
 } range_filter_t;
 static range_filter_t range_filters[RANGE_FILTER_COUNT];
 static uint16_t active_antenna_delay = CONFIG_UWB_ANTENNA_DELAY;
+#ifdef CONFIG_UWB_MPU6050_ENABLE
+static volatile bool imu_streaming = true;
+#endif
 #ifdef CONFIG_UWB_ROLE_ANCHOR
 static uwb_ranging_role_t active_role = UWB_RANGING_ANCHOR;
 #else
@@ -79,6 +82,9 @@ static void apply_dashboard_control(bool streaming, uint32_t sensing_interval_ms
 {
     /* Pause only UWB/IMU acquisition; Wi-Fi and the HTTP control server stay up. */
     uwb_ranging_set_paused(!streaming);
+#ifdef CONFIG_UWB_MPU6050_ENABLE
+    imu_streaming = streaming;
+#endif
     uwb_ranging_set_period(sensing_interval_ms);
     uwb_ranging_set_antenna_delay(antenna_delay);
     if (antenna_delay != active_antenna_delay) {
@@ -134,6 +140,35 @@ static esp_err_t init_imu(void)
     ESP_LOGI(TAG, "MPU6050 ready at 0x%02x on SDA=%d SCL=%d", address,
              CONFIG_UWB_MPU6050_SDA_GPIO, CONFIG_UWB_MPU6050_SCL_GPIO);
     return ESP_OK;
+}
+
+static void imu_sampling_task(void *argument)
+{
+    (void)argument;
+    TickType_t next_wake = xTaskGetTickCount();
+    unsigned consecutive_errors = 0;
+    const TickType_t interval = pdMS_TO_TICKS(CONFIG_UWB_TAG_PERIOD_MS);
+    for (;;) {
+        if (!imu_streaming) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            next_wake = xTaskGetTickCount();
+            continue;
+        }
+
+        mpu6050_data_t data;
+        esp_err_t err = mpu6050_read(imu, &data);
+        if (err == ESP_OK) {
+            const float accel[3] = {data.accel_x, data.accel_y, data.accel_z};
+            const float gyro[3] = {data.gyro_x, data.gyro_y, data.gyro_z};
+            telemetry_update_imu(true, accel, gyro, data.temperature);
+            consecutive_errors = 0;
+        } else {
+            telemetry_update_imu(false, NULL, NULL, 0);
+            if (++consecutive_errors == 1 || consecutive_errors % 100 == 0)
+                ESP_LOGW(TAG, "MPU6050 read failed: %s", esp_err_to_name(err));
+        }
+        vTaskDelayUntil(&next_wake, interval);
+    }
 }
 #endif
 
@@ -247,38 +282,15 @@ static void on_range(const uwb_ranging_peer_t *peer)
     filter->previous_range_ms = sample.timestamp_ms;
     filter->has_previous_range = true;
 
-#ifdef CONFIG_UWB_MPU6050_ENABLE
-    if (imu) {
-        mpu6050_data_t data;
-        esp_err_t err = mpu6050_read(imu, &data);
-        if (err == ESP_OK) {
-            sample.imu_valid = true;
-            sample.accel[0] = data.accel_x;
-            sample.accel[1] = data.accel_y;
-            sample.accel[2] = data.accel_z;
-            sample.gyro[0] = data.gyro_x;
-            sample.gyro[1] = data.gyro_y;
-            sample.gyro[2] = data.gyro_z;
-            sample.temperature_c = data.temperature;
-        } else {
-            ESP_LOGW(TAG, "MPU6050 read failed: %s", esp_err_to_name(err));
-        }
-    }
-#endif
-
 #ifdef CONFIG_UWB_BATTERY_MONITOR_ENABLE
     sample.battery_valid = read_battery(&sample.battery_voltage,
                                         &sample.battery_percent);
 #endif
     telemetry_publish(&sample);
 
-    ESP_LOGI(TAG, "distance=%.3f m speed=%+.3f m/s RX=%.2f dBm IMU=%s "
-             "accel=[%.3f %.3f %.3f] g gyro=[%.3f %.3f %.3f] dps "
+    ESP_LOGI(TAG, "distance=%.3f m speed=%+.3f m/s RX=%.2f dBm "
              "battery=%s %.2f V %.0f%%",
              sample.distance_m, sample.speed_mps, sample.rx_power_dbm,
-             sample.imu_valid ? "OK" : "N/A",
-             sample.accel[0], sample.accel[1], sample.accel[2],
-             sample.gyro[0], sample.gyro[1], sample.gyro[2],
              sample.battery_valid ? "OK" : "N/A",
              sample.battery_voltage, sample.battery_percent);
 }
@@ -292,6 +304,10 @@ static void sensing_task(void *argument)
         imu = NULL;
         ESP_LOGE(TAG, "IMU unavailable: %s; continuing with UWB",
                  esp_err_to_name(err));
+    } else if (xTaskCreatePinnedToCore(imu_sampling_task, "imu_sampler", 3072,
+                                       NULL, 4, NULL,
+                                       portNUM_PROCESSORS > 1 ? 0 : tskNO_AFFINITY) != pdPASS) {
+        ESP_LOGE(TAG, "could not start IMU sampling task");
     }
 #endif
 #ifdef CONFIG_UWB_BATTERY_MONITOR_ENABLE

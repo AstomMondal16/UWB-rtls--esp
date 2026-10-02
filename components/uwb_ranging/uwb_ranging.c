@@ -354,8 +354,16 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
             uint32_t slot = identity % DISCOVERY_SLOTS;
             uint64_t response_at = dw1000_future_tx_time(
                 DISCOVERY_BASE_US + slot * DISCOVERY_SLOT_US);
-            if (response_at)
-                dw1000_transmit(frame, sizeof(frame), response_at, NULL);
+            if (response_at && dw1000_transmit(frame, sizeof(frame), response_at, NULL) == ESP_OK) {
+#ifdef CONFIG_UWB_CIR_ENABLE
+                /* Save CIR from the tag's discovery blink as well as ranging.
+                 * Capture after the scheduled reply so SPI reads cannot delay it. */
+                esp_err_t cir_err = dw1000_capture_cir(ctx->peer.short_address,
+                                                       MSG_BLINK);
+                if (cir_err != ESP_OK)
+                    ESP_LOGW(TAG, "CIR discovery capture: %s", esp_err_to_name(cir_err));
+#endif
+            }
             continue;
         }
         if (!ctx->has_peer || type != MSG_POLL || !short_for_us(ctx, frame) || !from_peer(ctx, frame))
@@ -444,6 +452,7 @@ static void discover_anchors(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     make_blink(ctx, frame);
     if (dw1000_transmit(frame, FRAME_LEN, 0, NULL) != ESP_OK) return;
     int64_t deadline = now_ms() + DISCOVERY_WINDOW_MS;
+    uint16_t cir_peer_address = 0;
     while (now_ms() < deadline) {
         size_t length = 0;
         uint32_t remaining_ms = (uint32_t)(deadline - now_ms());
@@ -454,7 +463,17 @@ static void discover_anchors(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
             !long_for_us(ctx, frame))
             continue;
         remember_tag_anchor(ctx, frame, length);
+        cir_peer_address = ((uint16_t)frame[14] << 8) | frame[13];
     }
+#ifdef CONFIG_UWB_CIR_ENABLE
+    /* Capture after discovery so CIR SPI reads cannot make us miss another
+     * anchor's response in the same discovery window. */
+    if (cir_peer_address) {
+        esp_err_t cir_err = dw1000_capture_cir(cir_peer_address, MSG_RANGING_INIT);
+        if (cir_err != ESP_OK)
+            ESP_LOGW(TAG, "CIR discovery capture: %s", esp_err_to_name(cir_err));
+    }
+#endif
     ctx->last_discovery_ms = now_ms();
 }
 

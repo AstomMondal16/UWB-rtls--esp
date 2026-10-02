@@ -41,3 +41,7 @@ esp_err_t telemetry_start(const telemetry_config_t *config);
 
 /* Never blocks sensing. The oldest queued sample is discarded if full. */
 bool telemetry_publish(const telemetry_sample_t *sample);
+
+/* Update independent IMU telemetry; it does not require a UWB range sample. */
+void telemetry_update_imu(bool valid, const float accel[3],
+                          const float gyro[3], float temperature_c);

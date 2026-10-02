@@ -312,11 +312,6 @@ class LocalizationDashboard:
         try:
             self.brand_logo_source = tk.PhotoImage(
                 data=base64.b64encode(LOGO_FILE.read_bytes()))
-            for y in range(self.brand_logo_source.height()):
-                for x in range(self.brand_logo_source.width()):
-                    color = self.brand_logo_source.get(x, y)
-                    if isinstance(color, tuple) and min(color) >= 240:
-                        self.brand_logo_source.transparency_set(x, y, True)
             self.brand_logo = self.brand_logo_source
             tk.Label(brand, image=self.brand_logo, bg=PANEL, borderwidth=0).pack()
         except tk.TclError:
@@ -337,6 +332,8 @@ class LocalizationDashboard:
         actions.pack(side="right")
         tk.Label(actions, textvariable=self.scan_status, bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9)).pack(anchor="e", pady=(0, 6))
+        self.pose_button = self.button(actions, "START TRACKING", self.toggle_device_streaming, GREEN)
+        self.pose_button.pack(side="left", padx=4)
         self.button(actions, "↻  REFRESH SCAN", self.manual_scan, CYAN).pack(
             side="left", padx=4)
         self.collection_button = self.button(
@@ -415,7 +412,7 @@ class LocalizationDashboard:
         self.calibration_button = self.button(
             side, "CALIBRATE UWB FROM XYZ", self.calibrate_from_coordinates, AMBER)
         self.calibration_button.pack(fill="x", pady=(6, 0))
-        self.button(side, "VIEW CIR - SELECTED DEVICE", self.open_cir, CYAN).pack(
+        self.button(side, "VIEW CIR - IMU SELECTED DEVICE", self.open_cir, CYAN).pack(
             fill="x", pady=(6, 0))
 
         self.section(side, "CONTINUOUS NETWORK SCANNER")
@@ -651,10 +648,15 @@ class LocalizationDashboard:
         state = self.states.setdefault(key, {})
         state.update({"online": True, "seen": time.monotonic(), "sample": sample,
                       "error": ""})
+        streaming = any(item.get("online") and item.get("sample", {}).get("streaming", True)
+                        for item in self.states.values())
+        self.pose_button.configure(text="PAUSE TRACKING" if streaming else "START TRACKING",
+                                   fg=RED if streaming else GREEN)
         source_role = str(sample.get("role", "")).lower()
         source_mac = mac or key
         received = time.monotonic()
-        sample_id = (sample.get("sequence"), sample.get("timestamp_ms"))
+        sample_id = (sample.get("sequence"), sample.get("timestamp_ms"),
+                     sample.get("imu_sequence"), sample.get("imu_timestamp_ms"))
         samples = sample.get("ranges")
         if not isinstance(samples, list) or not samples:
             samples = [sample] if sample.get("valid") else []
@@ -687,13 +689,17 @@ class LocalizationDashboard:
                         self.finish_coordinate_calibration()
         if source_role == "tag" and sample.get("imu_valid"):
             orientation = self.orientations.setdefault(source_mac, Orientation())
-            orientation.update(sample)
+            orientation_sample = dict(sample)
+            orientation_sample["timestamp_ms"] = sample.get(
+                "imu_timestamp_ms", sample.get("timestamp_ms", 0))
+            orientation.update(orientation_sample)
         if sample.get("imu_valid"):
             accel, gyro = sample.get("accel", ()), sample.get("gyro", ())
             values = tuple(accel) + tuple(gyro)
             if len(values) == 6 and all(isinstance(value, (int, float)) and
                                         math.isfinite(value) for value in values):
-                stamp = float(sample.get("timestamp_ms", 0)) / 1000.0
+                stamp = float(sample.get(
+                    "imu_timestamp_ms", sample.get("timestamp_ms", 0))) / 1000.0
                 history = self.imu_histories.setdefault(source_mac, deque(maxlen=240))
                 if history and stamp < history[-1][0]:
                     history.clear()
@@ -846,6 +852,8 @@ class LocalizationDashboard:
         self.imu_selected_key = self.imu_name_to_key.get(self.imu_device_name.get())
         self.refresh_imu_selector(visual_device_names(self.devices, self.positions))
         self.draw_imu_graph()
+        if self.cir_window and self.cir_window.winfo_exists():
+            self.open_cir()
 
     def select_configured(self, _event=None):
         selection = self.configured.selection()
@@ -864,9 +872,9 @@ class LocalizationDashboard:
 
     def open_cir(self):
         device = next((item for item in self.devices
-                       if record_key(item) == self.selected_key), None)
+                       if record_key(item) == self.imu_selected_key), None)
         if not device:
-            self.status.set("Select a configured device, then press VIEW CIR")
+            self.status.set("Select a device in the IMU selector, then press VIEW CIR")
             return
         with self.discovery_lock:
             discovered = self.discovery_cache.get(device.get("mac"), {})
@@ -877,7 +885,7 @@ class LocalizationDashboard:
         if self.cir_window and self.cir_window.winfo_exists():
             self.cir_window.close()
         names = visual_device_names(self.devices)
-        identity = f"{names.get(self.selected_key, '')} {self.selected_key}".strip()
+        identity = f"{names.get(self.imu_selected_key, '')} {self.imu_selected_key}".strip()
         self.cir_window = CIRWindow(self.root, identity, ip, self.demo)
 
     def use_discovered(self):
@@ -997,6 +1005,40 @@ class LocalizationDashboard:
     def manual_scan(self):
         self.scan_status.set("Scanner: manual refresh requested")
         self.scan_now.set()
+
+    def toggle_device_streaming(self):
+        devices = self.device_snapshot()
+        if not devices:
+            self.status.set("ADD A DEVICE BEFORE STARTING TRACKING")
+            return
+        active = any(state.get("sample", {}).get("streaming", True)
+                     for state in self.states.values() if state.get("online"))
+        streaming = not active
+        with self.discovery_lock:
+            discovered = dict(self.discovery_cache)
+        targets = [(device, device.get("ip") or discovered.get(device.get("mac"), {}).get("ip"))
+                   for device in devices]
+        targets = [(device, ip) for device, ip in targets if ip]
+        if not targets:
+            self.status.set("NO DEVICE IP AVAILABLE TO CONTROL TRACKING")
+            return
+        self.pose_button.configure(text="PAUSE TRACKING" if streaming else "START TRACKING",
+                                   fg=RED if streaming else GREEN)
+        payload = json.dumps({"streaming": streaming}).encode()
+        def send():
+            succeeded = 0
+            for device, ip in targets:
+                try:
+                    request = Request(f"http://{ip}/api/control", data=payload,
+                                      headers={"Content-Type": "application/json"}, method="POST")
+                    with urlopen(request, timeout=1) as response:
+                        json.load(response)
+                    succeeded += 1
+                except (OSError, URLError, ValueError):
+                    pass
+            action = "started" if streaming else "paused"
+            self.post("notice", f"Tracking {action} on {succeeded}/{len(targets)} devices")
+        threading.Thread(target=send, daemon=True).start()
 
     def calibrate_from_coordinates(self):
         if self.calibration_pairs:
@@ -1253,8 +1295,12 @@ class LocalizationDashboard:
 
         def chart(left, right, title, columns, minimum):
             latest = history[-1]
-            peak = max(minimum, max(abs(sample[column])
-                                    for sample in history for column in columns))
+            raw_peak = max(minimum, max(abs(sample[column])
+                                        for sample in history for column in columns) * 1.15)
+            magnitude = 10 ** math.floor(math.log10(raw_peak))
+            normalized = raw_peak / magnitude
+            peak = magnitude * next(step for step in (1, 1.25, 1.5, 2, 2.5, 5, 7.5, 10)
+                                    if normalized <= step)
             canvas.create_text(left, 34, anchor="nw", text=title, fill=MUTED,
                                font=("Segoe UI", 8, "bold"))
             canvas.create_text(right, 34, anchor="ne",
@@ -1290,7 +1336,7 @@ class LocalizationDashboard:
 
         middle = width / 2
         chart(42, middle - 12, "ACCELEROMETER (g)", (1, 2, 3), 1.2)
-        chart(middle + 30, width - 14, "GYROSCOPE (°/s)", (4, 5, 6), 5.0)
+        chart(middle + 30, width - 14, "GYROSCOPE (°/s)", (4, 5, 6), 0.5)
 
     def zoom_map(self, event):
         direction = (1 if getattr(event, "delta", 0) > 0 or

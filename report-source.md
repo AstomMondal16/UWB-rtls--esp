@@ -4,7 +4,7 @@ Audience: developer/operator of the ESP32-S3 DW1000 + MPU6050 system
 Date: 2026-08-25  
 Scope: connect/disconnect UX, orientation reference grid, timestamped exports,
 and a defensible calibration for a single DW1000 anchor/tag pair.  
-Assumptions: channel 5, 64 MHz PRF, 110 kb/s and asymmetric double-sided TWR,
+Assumptions: channel 2, 64 MHz PRF, 110 kb/s and asymmetric double-sided TWR,
 as configured in this repository; one accurately measured static pair is
 available. Environmental mapping, anechoic testing and multi-anchor position
 calibration are excluded.

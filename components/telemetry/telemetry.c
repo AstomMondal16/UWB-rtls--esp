@@ -35,6 +35,13 @@ typedef struct {
     uint32_t send_interval_ms;
     uint32_t antenna_delay;
     char role[8];
+    bool imu_enabled;
+    bool imu_valid;
+    uint32_t imu_sequence;
+    uint64_t imu_timestamp_ms;
+    float imu_accel[3];
+    float imu_gyro[3];
+    float imu_temperature_c;
     telemetry_sample_t peer_latest[TELEMETRY_MAX_PEERS];
     uint8_t peer_count;
 } shared_state_t;
@@ -104,6 +111,26 @@ bool telemetry_publish(const telemetry_sample_t *sample)
     return queued;
 }
 
+void telemetry_update_imu(bool valid, const float accel[3],
+                          const float gyro[3], float temperature_c)
+{
+    uint64_t timestamp_ms = esp_timer_get_time() / 1000;
+    portENTER_CRITICAL(&state_lock);
+    state.imu_valid = valid;
+    state.imu_sequence++;
+    state.imu_timestamp_ms = timestamp_ms;
+    if (valid && accel && gyro) {
+        memcpy(state.imu_accel, accel, sizeof(state.imu_accel));
+        memcpy(state.imu_gyro, gyro, sizeof(state.imu_gyro));
+        state.imu_temperature_c = temperature_c;
+    } else {
+        memset(state.imu_accel, 0, sizeof(state.imu_accel));
+        memset(state.imu_gyro, 0, sizeof(state.imu_gyro));
+        state.imu_temperature_c = 0;
+    }
+    portEXIT_CRITICAL(&state_lock);
+}
+
 static esp_err_t telemetry_handler(httpd_req_t *request)
 {
     shared_state_t snapshot;
@@ -131,7 +158,9 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
         ",\"dropped\":%" PRIu32 ",\"timestamp_ms\":%" PRIu64
         ",\"age_ms\":%" PRIu64 ",\"mac\":\"%s\",\"ip\":\"%s\""
         ",\"role\":\"%s\",\"peer\":\"%s\",\"distance_m\":%.4f"
-        ",\"speed_mps\":%.4f,\"rx_power_dbm\":%s,\"imu_valid\":%s"
+        ",\"speed_mps\":%.4f,\"rx_power_dbm\":%s,\"imu_enabled\":%s"
+        ",\"imu_valid\":%s,\"imu_sequence\":%" PRIu32
+        ",\"imu_timestamp_ms\":%" PRIu64
         ",\"accel\":[%.4f,%.4f,%.4f],\"gyro\":[%.4f,%.4f,%.4f]"
         ",\"temperature_c\":%.2f,\"battery_valid\":%s"
         ",\"sensing_interval_ms\":%" PRIu32
@@ -143,11 +172,13 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
         snapshot.dropped, snapshot.latest.timestamp_ms, age_ms, device_mac,
         device_ip, snapshot.role, peer, snapshot.latest.distance_m,
         snapshot.latest.speed_mps, rx_power,
-        snapshot.latest.imu_valid ? "true" : "false",
-        snapshot.latest.accel[0], snapshot.latest.accel[1],
-        snapshot.latest.accel[2], snapshot.latest.gyro[0],
-        snapshot.latest.gyro[1], snapshot.latest.gyro[2],
-        snapshot.latest.temperature_c,
+        snapshot.imu_enabled ? "true" : "false",
+        snapshot.imu_valid ? "true" : "false", snapshot.imu_sequence,
+        snapshot.imu_timestamp_ms,
+        snapshot.imu_accel[0], snapshot.imu_accel[1],
+        snapshot.imu_accel[2], snapshot.imu_gyro[0],
+        snapshot.imu_gyro[1], snapshot.imu_gyro[2],
+        snapshot.imu_temperature_c,
         snapshot.latest.battery_valid ? "true" : "false",
         snapshot.sensing_interval_ms, snapshot.send_interval_ms,
         snapshot.antenna_delay,
@@ -443,6 +474,11 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
              config->device_id[3], config->device_id[4], config->device_id[5]);
     strlcpy(device_ip, config->ip_address, sizeof(device_ip));
     strlcpy(state.role, config->role, sizeof(state.role));
+#ifdef CONFIG_UWB_MPU6050_ENABLE
+    state.imu_enabled = true;
+#else
+    state.imu_enabled = false;
+#endif
     state.sensing_interval_ms = config->sensing_interval_ms;
     state.send_interval_ms = config->send_interval_ms;
     state.antenna_delay = config->antenna_delay;

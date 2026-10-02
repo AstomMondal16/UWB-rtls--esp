@@ -283,8 +283,8 @@ static esp_err_t reset_chip(void)
     return force_idle();
 }
 
-/* MODE_LONGDATA_RANGE_ACCURACY used by anchor.ino/tag.ino:
- * channel 5, 110 kb/s, PRF 64 MHz, preamble 2048, code 10. */
+/* MODE_LONGDATA_RANGE_ACCURACY profile:
+ * channel 2, 110 kb/s, PRF 64 MHz, preamble 2048, code 10. */
 static esp_err_t configure_radio(const uint8_t eui[8], uint16_t pan_id,
                                  uint16_t short_address)
 {
@@ -292,7 +292,7 @@ static esp_err_t configure_radio(const uint8_t eui[8], uint16_t pan_id,
     uint32_t sys_cfg = (1UL << 9) | (1UL << 12) | (1UL << 18) |
                        (1UL << 22) | (1UL << 29);
     const uint8_t tx_fctrl[5] = {0, 0, 0x2a, 0, 0};
-    const uint8_t chan_ctrl[4] = {0x55, 0x00, 0x8a, 0x52};
+    const uint8_t chan_ctrl[4] = {0x22, 0x00, 0x8a, 0x52};
     uint8_t reversed_eui[8];
     for (size_t i = 0; i < sizeof(reversed_eui); ++i)
         reversed_eui[i] = eui[sizeof(reversed_eui) - 1 - i];
@@ -315,12 +315,14 @@ static esp_err_t configure_radio(const uint8_t eui[8], uint16_t pan_id,
     ESP_RETURN_ON_ERROR(write_le(REG_LDE_IF, 0x0806, 0x0d, 1), TAG, "LDE1");
     ESP_RETURN_ON_ERROR(write_le(REG_LDE_IF, 0x1806, 0x0607, 2), TAG, "LDE2");
     ESP_RETURN_ON_ERROR(write_le(REG_LDE_IF, 0x2804, 0x0666, 2), TAG, "LDE REPC");
-    ESP_RETURN_ON_ERROR(write_le(REG_TX_POWER, NO_SUB, 0x85858585, 4), TAG, "TX power");
+    //
+    ESP_RETURN_ON_ERROR(write_le(REG_TX_POWER, NO_SUB, 0x67676767, 4), TAG, "TX power");    //channel 2, 110 kb/s, PRF 64 MHz, preamble 2048, code 10
+    //
     ESP_RETURN_ON_ERROR(write_le(REG_RF_CONF, 0x0b, 0xd8, 1), TAG, "RF RX");
-    ESP_RETURN_ON_ERROR(write_le(REG_RF_CONF, 0x0c, 0x001e3fe0, 4), TAG, "RF TX");
-    ESP_RETURN_ON_ERROR(write_le(REG_TX_CAL, 0x0b, 0xc0, 1), TAG, "PG delay");
-    ESP_RETURN_ON_ERROR(write_le(REG_FS_CTRL, 0x07, 0x0800041d, 4), TAG, "PLL cfg");
-    ESP_RETURN_ON_ERROR(write_le(REG_FS_CTRL, 0x0b, 0xbe, 1), TAG, "PLL tune");
+    ESP_RETURN_ON_ERROR(write_le(REG_RF_CONF, 0x0c, 0x00045ca0, 4), TAG, "RF TX");
+    ESP_RETURN_ON_ERROR(write_le(REG_TX_CAL, 0x0b, 0xc2, 1), TAG, "PG delay");
+    ESP_RETURN_ON_ERROR(write_le(REG_FS_CTRL, 0x07, 0x08400508, 4), TAG, "PLL cfg");
+    ESP_RETURN_ON_ERROR(write_le(REG_FS_CTRL, 0x0b, 0x26, 1), TAG, "PLL tune");
 
     uint32_t otp_xtal;
     ESP_RETURN_ON_ERROR(otp_read(0x01e, &otp_xtal), TAG, "XTAL OTP");

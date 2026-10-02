@@ -80,7 +80,7 @@ if UWB_CIR_ENABLE
 config UWB_CIR_SAMPLES
     int "CIR samples per capture"
     range 32 1016
-    default 64
+    default 1016
     help
         Window starts up to 16 samples before the detected first path and is
         clamped to accumulator boundaries. Select 1016 for the full CIR.
@@ -133,9 +133,9 @@ config UWB_TELEMETRY_BUFFER_LENGTH
     range 4 256
     default 32
     help
-        Number of complete UWB/IMU/battery samples buffered between the
-        sensing and Wi-Fi tasks. When full, the oldest sample is discarded so
-        ranging is never blocked by network activity.
+        Number of UWB range/battery samples buffered between the sensing and
+        Wi-Fi tasks. When full, the oldest sample is discarded so ranging is
+        never blocked by network activity. IMU samples use a separate snapshot.
 
 config UWB_TELEMETRY_SEND_INTERVAL_MS
     int "Dashboard network interval (milliseconds)"

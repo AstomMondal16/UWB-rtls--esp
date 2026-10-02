@@ -349,6 +349,7 @@ class Dashboard:
         self.orientation = Orientation()
         self.orientation_reference_pending = True
         self.last_sequence = -1
+        self.last_imu_sample = None
         self.latest = {}
         self.distance_history = deque(maxlen=120)
         self.speed_history = deque(maxlen=120)
@@ -702,6 +703,7 @@ class Dashboard:
         self.host = ""
         self.connected = False
         self.last_sequence = -1
+        self.last_imu_sample = None
         self.settings_loaded = False
         self.orientation = Orientation()
         self.orientation_reference_pending = True
@@ -863,15 +865,27 @@ class Dashboard:
                 self.role.set(role)
             self.settings_loaded = True
         self.antenna_delay.set(sample.get("antenna_delay", "—"))
+        imu_stamp = sample.get("imu_timestamp_ms", sample.get("timestamp_ms", 0))
+        imu_key = (sample.get("imu_sequence"), imu_stamp)
+        if sample.get("imu_valid") and imu_key != self.last_imu_sample:
+            self.last_imu_sample = imu_key
+            imu_sample = dict(sample, timestamp_ms=imu_stamp)
+            self.orientation.update(imu_sample)
+            if (self.orientation_reference_pending and
+                    self.orientation.last_ms is not None):
+                self.orientation.zero()
+                self.orientation_reference_pending = False
+            accel = sample.get("accel", [0, 0, 0])
+            gyro = sample.get("gyro", [0, 0, 0])
+            self.imu_text.configure(text=
+                f"ACCEL  X {accel[0]:+7.3f}  Y {accel[1]:+7.3f}  Z {accel[2]:+7.3f}  g\n"
+                f"GYRO   X {gyro[0]:+7.2f}  Y {gyro[1]:+7.2f}  Z {gyro[2]:+7.2f}  °/s\n"
+                f"TEMP   {sample.get('temperature_c', 0):5.1f} °C")
+            self.draw_device()
         if not sample.get("valid") or sample.get("sequence") == self.last_sequence:
             return
         self.last_sequence = sample.get("sequence")
         self.records.append(dict(sample))
-        self.orientation.update(sample)
-        if (self.orientation_reference_pending and sample.get("imu_valid") and
-                self.orientation.last_ms is not None):
-            self.orientation.zero()
-            self.orientation_reference_pending = False
         distance, speed = sample.get("distance_m", 0), sample.get("speed_mps", 0)
         if self.calibration_target is not None:
             self.calibration_samples.append(distance)
@@ -902,11 +916,6 @@ class Dashboard:
             self.battery.set(f"{sample.get('battery_percent', 0):.0f}")
         else:
             self.battery.set("—")
-        accel, gyro = sample.get("accel", [0, 0, 0]), sample.get("gyro", [0, 0, 0])
-        self.imu_text.configure(text=
-            f"ACCEL  X {accel[0]:+7.3f}  Y {accel[1]:+7.3f}  Z {accel[2]:+7.3f}  g\n"
-            f"GYRO   X {gyro[0]:+7.2f}  Y {gyro[1]:+7.2f}  Z {gyro[2]:+7.2f}  °/s\n"
-            f"TEMP   {sample.get('temperature_c', 0):5.1f} °C")
         self.draw_device()
         self.distance_trend.draw()
         self.speed_trend.draw()

@@ -1,5 +1,6 @@
 """Live DW1000 CIR viewer; standard library only."""
 import csv
+from collections import deque
 from datetime import datetime
 from http.client import HTTPConnection, HTTPException
 import json
@@ -11,10 +12,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from urllib.error import HTTPError, URLError
 
-from dashboard import BG, PANEL, TEXT, MUTED, CYAN, AMBER, BORDER
+from dashboard import BG, TEXT, MUTED, CYAN, AMBER, BORDER
 
 POLL_SECONDS = 0.1
 TABLE_PAGE_SIZE = 64
+WATERFALL_FRAMES = 72
 
 
 def validate_cir(data):
@@ -95,13 +97,15 @@ class CIRWindow(tk.Toplevel):
         self.identity, self.ip, self.demo = identity, ip, demo
         self.snapshot = None
         self.rows = []
+        self.history = deque(maxlen=WATERFALL_FRAMES)
+        self.last_history_key = None
         self.table_rows = []
         self.table_offset = 0
         self.results = queue.Queue(maxsize=1)
         self.stopped = threading.Event()
         self.title(f"CIR - {identity}")
-        self.geometry("900x670")
-        self.minsize(660, 500)
+        self.geometry("900x760")
+        self.minsize(660, 620)
         self.configure(bg=BG)
         self.protocol("WM_DELETE_WINDOW", self.close)
         tk.Label(self, text=f"CHANNEL IMPULSE RESPONSE  |  {identity}",
@@ -113,7 +117,7 @@ class CIRWindow(tk.Toplevel):
         self.status = tk.StringVar(value="Connecting to CIR endpoint...")
         tk.Label(self, textvariable=self.status, bg=BG, fg=TEXT,
                  wraplength=830, justify="left").pack(fill="x", padx=16, pady=8)
-        self.graph = tk.Canvas(self, bg=PANEL, height=260,
+        self.graph = tk.Canvas(self, bg="#05080C", height=390,
                                highlightbackground=BORDER, highlightthickness=1)
         self.graph.pack(fill="both", expand=True, padx=16)
         self.graph.bind("<Configure>", lambda _event: self.draw())
@@ -205,7 +209,7 @@ class CIRWindow(tk.Toplevel):
                 self.status.set("CIR is OFF. Enable UWB ranging > Enable DW1000 channel impulse "
                                 "response (CIR) capture in menuconfig, then rebuild and flash.")
             elif not data["valid"]:
-                self.status.set("CIR is ON. Waiting for a successful ranging exchange/capture.")
+                self.status.set("CIR is ON. Waiting for a packet from another UWB device.")
             else:
                 age = data["age_ms"] / 1000
                 capture = data.get("capture_us")
@@ -222,6 +226,10 @@ class CIRWindow(tk.Toplevel):
             self.save_button.configure(state="normal" if self.snapshot else "disabled")
             if changed:
                 self.rows, self.table_rows = rows, table_rows
+                key = snapshot_key(self.snapshot)
+                if key is not None and rows and key != self.last_history_key:
+                    self.history.append((rows[0][0], tuple(row[3] for row in rows)))
+                    self.last_history_key = key
                 if self.table_offset >= len(rows):
                     self.table_offset = 0
                 self.update_table()
@@ -258,29 +266,88 @@ class CIRWindow(tk.Toplevel):
                                fill=MUTED, font=("Segoe UI", 12))
             return
         rows = self.rows
-        left, top, right, bottom = 65, 30, max(66, width - 25), max(31, height - 40)
-        peak = max(1, max(row[3] for row in rows)) * 1.1
-        start, span = rows[0][0], max(1, len(rows) - 1)
-        for tick in range(5):
-            fraction = tick / 4
-            y = bottom - fraction * (bottom - top)
-            canvas.create_line(left, y, right, y, fill=BORDER)
-            canvas.create_text(left - 6, y, text=f"{fraction * peak:.0f}", anchor="e", fill=MUTED)
-            x = left + fraction * (right - left)
-            canvas.create_text(x, bottom + 13, text=f"{start + fraction * span:.0f}", fill=MUTED)
+        peak_row = max(rows, key=lambda row: row[3])
+        peak_index = min(1015, max(0, peak_row[0]))
+        peak_padding = max(1, min(100, peak_index, 1015 - peak_index))
+        window_start = peak_index - peak_padding
+        window_end = peak_index + peak_padding
+        window_span = max(1, window_end - window_start)
+        left, right = 62, max(63, width - 16)
+        plot_top, plot_bottom = 25, max(80, int(height * 0.34))
+        heat_top, heat_bottom = plot_bottom + 42, max(plot_bottom + 44, height - 28)
+
+        canvas.create_text(left, 13, text="CIR MAGNITUDE  ·  LIVE CAPTURE",
+                           anchor="w", fill="#D5E7EF", font=("Segoe UI", 9, "bold"))
+        current_peak = max(1.0, max(row[3] for row in rows))
+        for tick in range(4):
+            fraction = tick / 3
+            y = plot_bottom - fraction * (plot_bottom - plot_top)
+            canvas.create_line(left, y, right, y, fill="#27313A")
+            canvas.create_text(left - 7, y, text=f"{fraction * current_peak:.0f}",
+                               anchor="e", fill="#9BAAB4", font=("Segoe UI", 7))
+
         points = []
         for index, _real, _imag, magnitude in rows:
-            points.extend((left + (index - start) / span * (right - left),
-                           bottom - magnitude / peak * (bottom - top)))
+            if window_start <= index <= window_end:
+                x = left + (index - window_start) / window_span * (right - left)
+                y = plot_bottom - magnitude / (current_peak * 1.08) * (plot_bottom - plot_top)
+                points.extend((x, y))
         if len(points) >= 4:
-            canvas.create_line(*points, fill=CYAN, width=2)
+            canvas.create_polygon(points[0], plot_bottom, *points, points[-2], plot_bottom,
+                                  fill="#10313B", outline="")
+            canvas.create_line(*points, fill="#55D7E8", width=1.5)
+
         fp = self.snapshot["first_path_index"] / 64
-        if start <= fp <= start + span:
-            x = left + (fp - start) / span * (right - left)
-            canvas.create_line(x, top, x, bottom, fill=AMBER, dash=(5, 3), width=2)
-        canvas.create_text(left, 13, text="Magnitude (raw)    |    Amber: detected first path",
-                           anchor="w", fill=TEXT)
-        canvas.create_text((left + right) / 2, height - 10, text="CIR sample index", fill=TEXT)
+        if window_start <= fp <= window_end:
+            x = left + (fp - window_start) / window_span * (right - left)
+            canvas.create_line(x, plot_top, x, plot_bottom, fill="#F4B84A",
+                               dash=(4, 3), width=1)
+
+        frames = list(self.history)
+        canvas.create_text(left, heat_top - 14,
+                           text=f"CIR WATERFALL  ·  OLDEST → NEWEST  ·  {len(frames)} CAPTURES",
+                           anchor="w", fill="#D5E7EF", font=("Segoe UI", 8, "bold"))
+        canvas.create_rectangle(left, heat_top, right, heat_bottom,
+                                fill="#041A3B", outline="#243746")
+        if frames and heat_bottom > heat_top:
+            image_width = max(1, int(right - left))
+            image_height = min(len(frames), max(1, int(heat_bottom - heat_top)))
+            strongest = max((max(values, default=0) for _start, values in frames), default=1)
+            strongest = max(strongest, 1)
+            photo = tk.PhotoImage(width=image_width, height=image_height)
+            visible_frames = frames[-image_height:]
+            for row_index, (frame_start, values) in enumerate(visible_frames):
+                colors = []
+                for column in range(image_width):
+                    sample_index = round(window_start + column * window_span / max(1, image_width - 1))
+                    offset = sample_index - frame_start
+                    magnitude = values[offset] if 0 <= offset < len(values) else 0
+                    level = math.sqrt(max(0.0, magnitude / strongest))
+                    if level < 0.38:
+                        amount = level / 0.38
+                        rgb = (3, int(22 + 66 * amount), int(54 + 105 * amount))
+                    elif level < 0.72:
+                        amount = (level - 0.38) / 0.34
+                        rgb = (int(4 + 20 * amount), int(88 + 160 * amount), int(159 - 135 * amount))
+                    else:
+                        amount = (level - 0.72) / 0.28
+                        rgb = (int(24 + 231 * amount), int(248 - 218 * amount), int(24 - 14 * amount))
+                    colors.append("#%02x%02x%02x" % rgb)
+                photo.put("{" + " ".join(colors) + "}", to=(0, row_index))
+            canvas.create_image(left, heat_top, image=photo, anchor="nw")
+            self.heatmap_photo = photo
+            if window_start <= fp <= window_end:
+                x = left + (fp - window_start) / window_span * (right - left)
+                canvas.create_line(x, heat_top, x, heat_bottom, fill="#F4B84A",
+                                   dash=(4, 3), width=1)
+
+        for fraction in (0, 0.5, 1):
+            x = left + fraction * (right - left)
+            sample = window_start + fraction * window_span
+            canvas.create_text(x, height - 10, text=f"{sample:.0f}",
+                               fill="#B5C3CC", font=("Segoe UI", 8))
+        canvas.create_text((left + right) / 2, height - 1, text="CIR sample index",
+                           fill="#D5E7EF", font=("Segoe UI", 8))
 
     def save(self):
         if not self.snapshot:

@@ -2,7 +2,7 @@
 
 Native ESP-IDF anchor/tag firmware ported from the frame flow used by
 [thotro/arduino-dw1000](https://github.com/thotro/arduino-dw1000). It uses the
-same `MODE_LONGDATA_RANGE_ACCURACY` profile: channel 5, 110 kb/s, 64 MHz PRF,
+same `MODE_LONGDATA_RANGE_ACCURACY` profile: channel 2, 110 kb/s, 64 MHz PRF,
 2048-symbol preamble and preamble code 10.
 
 The startup and runtime flow is intentional:
