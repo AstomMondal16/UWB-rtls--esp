@@ -1003,6 +1003,34 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
                 androidx.compose.ui.geometry.Offset(size.width, y), 1f)
             gy += step
         }
+        val yAxisVisible = 0.0 in visibleMinX..visibleMaxX
+        val xAxisVisible = 0.0 in visibleMinY..visibleMaxY
+        val yAxisX = screen(0.0, centerY).x
+        val xAxisY = screen(centerX, 0.0).y
+        val yAxisColor = Color(0x887A72C6)
+        val xAxisColor = Color(0x88739DB0)
+        if (yAxisVisible) {
+            drawLine(yAxisColor, androidx.compose.ui.geometry.Offset(yAxisX, margin),
+                androidx.compose.ui.geometry.Offset(yAxisX, size.height - margin), 1.75.dp.toPx())
+        }
+        if (xAxisVisible) {
+            drawLine(xAxisColor, androidx.compose.ui.geometry.Offset(margin, xAxisY),
+                androidx.compose.ui.geometry.Offset(size.width - margin, xAxisY), 1.75.dp.toPx())
+        }
+        if (yAxisVisible || xAxisVisible) drawIntoCanvas { canvas ->
+            val axisLabelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                textSize = 10.sp.toPx()
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            if (yAxisVisible) {
+                axisLabelPaint.color = yAxisColor.toArgb()
+                canvas.nativeCanvas.drawText("Y", yAxisX + 4.dp.toPx(), margin + 12.dp.toPx(), axisLabelPaint)
+            }
+            if (xAxisVisible) {
+                axisLabelPaint.color = xAxisColor.toArgb()
+                canvas.nativeCanvas.drawText("X", size.width - margin - 12.dp.toPx(), xAxisY - 4.dp.toPx(), axisLabelPaint)
+            }
+        }
         drawIntoCanvas { canvas ->
             val nativeCanvas = canvas.nativeCanvas
             val labelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
