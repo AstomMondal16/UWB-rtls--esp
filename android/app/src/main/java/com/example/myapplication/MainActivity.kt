@@ -298,30 +298,20 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
             contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
-                Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(20.dp)) {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(22.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Image(painterResource(R.drawable.sense_logo), contentDescription = "SE UWB",
                                 contentScale = ContentScale.Fit, modifier = Modifier.width(76.dp).height(31.dp))
                             Spacer(Modifier.width(8.dp))
                             Column(Modifier.weight(1f)) {
                                 Text("UWB LOCALIZATION", color = Ink, fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 11.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                                    fontSize = 15.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                                 Text("${snapshot.states.values.count { it.online }} online · ${snapshot.positions.size} tags",
-                                    color = Muted, fontSize = 9.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                            }
-                            Surface(color = Color(0xFFEAF7F8), shape = RoundedCornerShape(20.dp),
-                                modifier = Modifier.width(52.dp).height(34.dp).clickable { repo.setStreaming(!tracking) }
-                                    .semantics { contentDescription = if (tracking) "Pause device data flow" else "Start device data flow" }) {
-                                Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.Center) {
-                                    Text(if (tracking) "Ⅱ" else "▶", color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                    Spacer(Modifier.width(3.dp))
-                                    Text(if (tracking) "Pause" else "Start", color = Ink, fontSize = 8.sp, maxLines = 1)
-                                }
+                                    color = Muted, fontSize = 11.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                             }
                         }
-                        Row(Modifier.fillMaxWidth().padding(top = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             HeaderAction("⚙", "Devices", Modifier.weight(1f), onClick = { configOpen = true })
                             HeaderAction(if (snapshot.calibrationProgress.isBlank()) "⚑" else "×", "Calibrate", Modifier.weight(1f), onClick = {
@@ -332,10 +322,11 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
                                     if (snapshot.collecting) { repo.setCollecting(false); onSaveCsv() }
                                     else repo.setCollecting(true)
                                 })
+                            HeaderAction(if (tracking) "Ⅱ" else "▶", if (tracking) "Pause" else "Start", Modifier.weight(1f), onClick = { repo.setStreaming(!tracking) })
                         }
                     }
                 }
-                Text(snapshot.status, color = Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                Text(snapshot.status, color = Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(start = 12.dp, top = 5.dp))
                 if (snapshot.calibrationProgress.isNotBlank()) Text(snapshot.calibrationProgress, color = Amber, fontSize = 11.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 12.dp))
@@ -353,6 +344,7 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
                     } else {
                         LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, fitMapRequest,
                             Modifier.fillMaxWidth().height(270.dp).clip(RoundedCornerShape(12.dp)))
+                        MapLegend()
                     }
                     snapshot.positions.entries.firstOrNull()?.let { (tag, p) ->
                         Text("${names[tag] ?: "Tag"}   X ${String.format(Locale.US, "%+.2f", p.x)} m   Y ${String.format(Locale.US, "%+.2f", p.y)} m   RMS ${p.error.fmt()} m",
@@ -422,9 +414,6 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
         onDismiss = { configOpen = false })
     if (editorOpen) DeviceEditorDialog(editing, onDismiss = { editorOpen = false; configOpen = true }, onSave = { record ->
         val error = repo.upsert(record, editing?.key)
-        if (error == null) { editorOpen = false; configOpen = true } else repo.setStatus(error)
-    }, onApplyRole = { record ->
-        val error = repo.upsert(record, editing?.key)
         if (error == null) {
             if (record.ip.isNotBlank()) repo.postControl(record.ip, JSONObject().put("role", record.role))
             editorOpen = false; configOpen = true
@@ -438,11 +427,13 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
 
 @Composable
 private fun HeaderAction(icon: String, label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    TextButton(onClick = onClick, modifier = modifier.height(44.dp).semantics { contentDescription = label },
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 2.dp, vertical = 0.dp)) {
+    Surface(color = Color(0xFFF3F8FA), shape = RoundedCornerShape(14.dp),
+        modifier = modifier.height(56.dp).clickable(onClick = onClick)
+            .semantics { contentDescription = label }) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Text(icon, color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Text(label, color = Ink, fontSize = 9.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            Text(icon, color = Cyan, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text(label, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -528,18 +519,22 @@ private fun ConfigurationDialog(snapshot: DashboardSnapshot, names: Map<String, 
                     }
                     items(available, key = { "found-${it.mac}" }) { found ->
                         Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(12.dp)) {
-                            Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(found.mac, color = Ink, fontWeight = FontWeight.SemiBold)
-                                    Text("${found.ip} · ${found.role.uppercase()}", color = Muted, fontSize = 11.sp)
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(found.mac, color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                                    maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Text("${found.ip} · ${found.role.uppercase()}", color = Muted, fontSize = 10.sp,
+                                        maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f))
+                                    Surface(color = Color(0xFFE8F5EE), shape = RoundedCornerShape(20.dp)) {
+                                        Text("FOUND", color = Green, fontWeight = FontWeight.Bold, fontSize = 9.sp,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                                    }
+                                    TextButton(onClick = {
+                                        onEdit(DeviceRecord(found.mac, found.ip, found.role.takeIf { it == "tag" || it == "anchor" } ?: "anchor"))
+                                    }) { Text("Configure") }
                                 }
-                                Surface(color = Color(0xFFE8F5EE), shape = RoundedCornerShape(20.dp)) {
-                                    Text("ACTIVE", color = Green, fontWeight = FontWeight.Bold, fontSize = 9.sp,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
-                                }
-                                TextButton(onClick = {
-                                    onEdit(DeviceRecord(found.mac, found.ip, found.role.takeIf { it == "tag" || it == "anchor" } ?: "anchor"))
-                                }) { Text("Configure") }
                             }
                         }
                     }
@@ -550,9 +545,55 @@ private fun ConfigurationDialog(snapshot: DashboardSnapshot, names: Map<String, 
 }
 
 @Composable
+private fun MapLegend() {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        MapLegendItem(tag = false, label = "Active anchor", tint = Green, modifier = Modifier.weight(1f))
+        MapLegendItem(tag = false, label = "Offline anchor", tint = Muted, modifier = Modifier.weight(1f))
+        MapLegendItem(tag = true, label = "Tag", tint = Cyan, modifier = Modifier.weight(.7f))
+    }
+}
+
+@Composable
+private fun MapLegendItem(tag: Boolean, label: String, tint: Color, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Canvas(Modifier.size(14.dp)) {
+            if (tag) {
+                drawCircle(tint, radius = size.minDimension * .34f)
+                drawCircle(Ink, radius = size.minDimension * .34f, style = Stroke(1.dp.toPx()))
+            } else {
+                val triangle = Path().apply {
+                    moveTo(size.width / 2, 1.dp.toPx())
+                    lineTo(1.dp.toPx(), size.height - 1.dp.toPx())
+                    lineTo(size.width - 1.dp.toPx(), size.height - 1.dp.toPx())
+                    close()
+                }
+                drawPath(triangle, tint)
+                drawPath(triangle, Ink, style = Stroke(1.dp.toPx()))
+            }
+        }
+        Spacer(Modifier.width(4.dp))
+        Text(label, color = Muted, fontSize = 9.sp, maxLines = 1, softWrap = false,
+            overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
 private fun ConfigurationDeviceRow(device: DeviceRecord, name: String, state: DeviceState?, onEdit: () -> Unit,
                                    onDelete: () -> Unit, onApplyRole: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
+        val receivedAt = state?.sample?.optLong("_received_at", 0L) ?: 0L
+        val ageMs = (System.currentTimeMillis() - receivedAt).coerceAtLeast(0L)
+        val presence = when {
+            state?.online == true -> "ACTIVE"
+            receivedAt > 0L && ageMs <= 15_000L -> "STALE"
+            else -> "OFFLINE"
+        }
+        val presenceColor = when (presence) {
+            "ACTIVE" -> Green
+            "STALE" -> Amber
+            else -> Muted
+        }
         Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -565,13 +606,24 @@ private fun ConfigurationDeviceRow(device: DeviceRecord, name: String, state: De
                 }
                 TextButton(onClick = onEdit) { Text("Edit", fontSize = 11.sp) }
             }
+            Text("X ${device.x.fmt()}   Y ${device.y.fmt()}   Z ${device.z.fmt()} m", color = Muted, fontSize = 10.sp,
+                maxLines = 1, modifier = Modifier.padding(top = 4.dp))
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 3.dp)) {
-                Text("X ${device.x.fmt()}   Y ${device.y.fmt()}   Z ${device.z.fmt()} m", color = Muted, fontSize = 10.sp,
-                    maxLines = 1, modifier = Modifier.weight(1f))
-                val active = state?.online == true
-                Surface(color = if (active) Color(0xFFE8F5EE) else Color(0xFFF1F3F4), shape = RoundedCornerShape(20.dp)) {
-                    Text(if (active) "ACTIVE" else "OFFLINE", color = if (active) Green else Muted,
-                        fontWeight = FontWeight.Bold, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                val freshness = when {
+                    receivedAt <= 0L -> "No telemetry received"
+                    ageMs < 1_000L -> "Telemetry received just now"
+                    else -> "Last telemetry ${ageMs / 1_000L}s ago"
+                }
+                Text(freshness, color = Muted, fontSize = 10.sp, maxLines = 1,
+                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                val statusBackground = when (presence) {
+                    "ACTIVE" -> Color(0xFFE8F5EE)
+                    "STALE" -> Color(0xFFFFF3DF)
+                    else -> Color(0xFFF1F3F4)
+                }
+                Surface(color = statusBackground, shape = RoundedCornerShape(20.dp)) {
+                    Text(presence, color = presenceColor, fontWeight = FontWeight.Bold, fontSize = 9.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 8.dp, top = 2.dp)) {
@@ -804,10 +856,10 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
 @Composable
 private fun SectionCard(title: String, headerAction: (@Composable () -> Unit)? = null,
                         content: @Composable ColumnScope.() -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(14.dp), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
         Column(Modifier.fillMaxWidth().padding(14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold,
+                Text(title, color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold,
                     letterSpacing = .7.sp, modifier = Modifier.weight(1f))
                 headerAction?.invoke()
             }
@@ -819,7 +871,7 @@ private fun SectionCard(title: String, headerAction: (@Composable () -> Unit)? =
 
 @Composable
 private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
-                               onSave: (DeviceRecord) -> Unit, onApplyRole: (DeviceRecord) -> Unit) {
+                               onSave: (DeviceRecord) -> Unit) {
     var mac by remember(device) { mutableStateOf(device?.mac.orEmpty()) }
     var ip by remember(device) { mutableStateOf(device?.ip.orEmpty()) }
     var role by remember(device) { mutableStateOf(device?.role ?: "anchor") }
@@ -855,10 +907,7 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
             }
         },
         confirmButton = { TextButton(onClick = { record()?.let(onSave) }) { Text("Save") } },
-        dismissButton = { Row {
-            TextButton(onClick = { record()?.let(onApplyRole) }) { Text("Save + apply role") }
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        } })
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable
