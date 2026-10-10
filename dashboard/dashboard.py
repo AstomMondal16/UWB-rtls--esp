@@ -3,10 +3,14 @@
 
 import argparse
 import csv
+import hashlib
+import hmac
 import json
 import math
+import os
 import queue
 import socket
+import ssl
 import statistics
 import threading
 import time
@@ -16,7 +20,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from tkinter import filedialog
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from http.client import HTTPSConnection
 
 BG = "#e1e8ec"
 PANEL = "#f4f6f7"
@@ -41,6 +46,58 @@ DW1000_AIR_SPEED_MPS = 299_702_547
 CALIBRATION_SAMPLES = 100
 DEVICE_HISTORY_FILE = Path.home() / ".spatial_node_devices.json"
 LOGO_FILE = Path(__file__).resolve().parent / "assets" / "sense-logo.png"
+MAX_TELEMETRY_BYTES = 32 * 1024
+MAX_CONTROL_BYTES = 8 * 1024
+
+
+def read_json_response(response, max_bytes):
+    body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"HTTP response exceeds {max_bytes} bytes")
+    return json.loads(body.decode("utf-8"))
+
+
+def api_json(address, device_id, method="GET", body=None, max_bytes=MAX_TELEMETRY_BYTES):
+    try:
+        credentials = json.loads(os.environ["UWB_DEVICE_CREDENTIALS"])
+        identity = normalize_mac(device_id) or str(device_id).strip().lower()
+        secret = credentials[identity]
+        api_key = secret["api_key"]
+        fingerprint = secret["tls_fingerprint"].replace(":", "").replace(" ", "")
+        expected = bytes.fromhex(fingerprint)
+    except (KeyError, ValueError, TypeError) as error:
+        raise ValueError("Set UWB_DEVICE_CREDENTIALS JSON for each device MAC/IP") from error
+    if len(api_key) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in api_key):
+        raise ValueError("Device API key must contain 64 hexadecimal characters")
+    if len(expected) != 32 or len(fingerprint) != 64:
+        raise ValueError("Device TLS fingerprint must be 64 hexadecimal characters")
+    parsed = urlsplit(address)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("The device API requires HTTPS")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    connection = HTTPSConnection(parsed.hostname, parsed.port or 443,
+                                 timeout=1.0, context=context)
+    try:
+        headers = {"Authorization": "Bearer " + api_key,
+                   "Cache-Control": "no-cache"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        connection.request(method, parsed.path or "/", body=body, headers=headers)
+        certificate = connection.sock.getpeercert(binary_form=True) if connection.sock else b""
+        actual = hashlib.sha256(certificate).digest()
+        if not hmac.compare_digest(actual, expected):
+            raise ssl.SSLError("Device TLS certificate fingerprint mismatch")
+        response = connection.getresponse()
+        payload = response.read(max_bytes + 1)
+        if len(payload) > max_bytes:
+            raise ValueError(f"HTTP response exceeds {max_bytes} bytes")
+        if response.status != 200:
+            raise OSError(f"Device HTTP status {response.status}: {response.reason}")
+        return json.loads(payload.decode("utf-8"))
+    finally:
+        connection.close()
 
 
 def normalize_mac(value):
@@ -343,6 +400,7 @@ class Dashboard:
         self.worker_thread = None
         self.host = ""
         self.active_target = ""
+        self.device_identity = ""
         self.connected = False
         self.grid_enabled = True
         self.device_zoom = 1.0
@@ -700,6 +758,7 @@ class Dashboard:
         self.stop_event = threading.Event()
         stop_event = self.stop_event
         self.active_target = self.target.get().strip()
+        self.device_identity = normalize_mac(self.active_target) or endpoint_key(self.active_target)
         self.host = ""
         self.connected = False
         self.last_sequence = -1
@@ -736,6 +795,7 @@ class Dashboard:
             self.demo_worker(stop_event)
             return
         target = self.active_target
+        device_id = self.device_identity or normalize_mac(target) or target
         try:
             if normalize_mac(target):
                 target = discover_by_mac(target)
@@ -745,16 +805,16 @@ class Dashboard:
             if not target:
                 raise ValueError("Enter the device MAC address or IP")
             host = (target if target.startswith(("http://", "https://"))
-                    else "http://" + target)
+                    else "https://" + target)
+            if host.startswith("http://"):
+                host = "https://" + host[len("http://"):]
             if stop_event.is_set():
                 return
             host = host.rstrip("/")
             self.post("host", host, stop_event)
             while not stop_event.is_set():
-                request = Request(host + "/api/telemetry",
-                                  headers={"Cache-Control": "no-cache"})
-                with urlopen(request, timeout=0.8) as response:
-                    data = json.load(response)
+                data = api_json(host + "/api/telemetry", device_id,
+                                max_bytes=MAX_TELEMETRY_BYTES)
                 if stop_event.is_set():
                     return
                 self.post("data", data, stop_event)
@@ -828,6 +888,7 @@ class Dashboard:
                     self.connected = False
                     self.host = ""
                     self.active_target = ""
+                    self.device_identity = ""
                     self.connect_button.configure(text="CONNECT")
                     self.status.set("OFFLINE  •  " + payload)
                     self.status_dot.configure(fg=RED)
@@ -1028,11 +1089,9 @@ class Dashboard:
         def send():
             try:
                 body = json.dumps(payload).encode()
-                request = Request(host + "/api/control", data=body,
-                                  headers={"Content-Type": "application/json"},
-                                  method="POST")
-                with urlopen(request, timeout=1.0) as response:
-                    self.post("control", json.load(response), source)
+                result = api_json(host + "/api/control", self.device_identity,
+                                  method="POST", body=body, max_bytes=MAX_CONTROL_BYTES)
+                self.post("control", result, source)
             except (OSError, URLError, ValueError) as error:
                 self.post("error", str(error), source)
         threading.Thread(target=send, daemon=True).start()

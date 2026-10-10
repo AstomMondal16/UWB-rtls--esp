@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include "esp_check.h"
 #include "esp_http_server.h"
+#include "esp_https_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -18,6 +19,9 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
+#ifndef CONFIG_UWB_DEVICE_SECRET
+#define CONFIG_UWB_DEVICE_SECRET ""
+#endif
 #ifdef CONFIG_UWB_CIR_ENABLE
 #include "dw1000.h"
 #endif
@@ -48,11 +52,46 @@ typedef struct {
 
 static const char *TAG = "telemetry";
 static QueueHandle_t samples;
+static TaskHandle_t collector_task_handle;
+static httpd_handle_t api_server;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static shared_state_t state = {.streaming = true};
 static char device_mac[18];
 static char device_ip[16];
 static telemetry_control_callback_t control_callback;
+#ifdef CONFIG_UWB_TLS_ENABLE
+extern const uint8_t device_cert_pem_start[] asm("_binary_device_cert_pem_start");
+extern const uint8_t device_cert_pem_end[] asm("_binary_device_cert_pem_end");
+extern const uint8_t device_key_pem_start[] asm("_binary_device_key_pem_start");
+extern const uint8_t device_key_pem_end[] asm("_binary_device_key_pem_end");
+#endif
+
+static bool request_authorized(httpd_req_t *request)
+{
+    const size_t secret_len = strlen(CONFIG_UWB_DEVICE_SECRET);
+    const size_t expected_len = sizeof("Bearer ") - 1 + secret_len;
+    size_t header_len = httpd_req_get_hdr_value_len(request, "Authorization");
+    if (header_len != expected_len || header_len > 80) return false;
+    char header[81];
+    if (httpd_req_get_hdr_value_str(request, "Authorization", header,
+                                    sizeof(header)) != ESP_OK)
+        return false;
+    if (memcmp(header, "Bearer ", sizeof("Bearer ") - 1)) return false;
+    const char *secret = CONFIG_UWB_DEVICE_SECRET;
+    unsigned difference = 0;
+    for (size_t i = 0; i < secret_len; ++i)
+        difference |= (unsigned char)header[sizeof("Bearer ") - 1 + i] ^
+                      (unsigned char)secret[i];
+    return difference == 0;
+}
+
+static esp_err_t require_authorized(httpd_req_t *request)
+{
+    if (request_authorized(request)) return ESP_OK;
+    httpd_resp_set_hdr(request, "WWW-Authenticate", "Bearer");
+    return httpd_resp_send_err(request, HTTPD_401_UNAUTHORIZED,
+                               "valid device key required");
+}
 
 static BaseType_t network_core(void)
 {
@@ -133,6 +172,8 @@ void telemetry_update_imu(bool valid, const float accel[3],
 
 static esp_err_t telemetry_handler(httpd_req_t *request)
 {
+    esp_err_t auth_err = require_authorized(request);
+    if (auth_err != ESP_OK) return auth_err;
     shared_state_t snapshot;
     portENTER_CRITICAL(&state_lock);
     snapshot = state;
@@ -296,6 +337,8 @@ static bool parse_control(const char *body, shared_state_t *updated)
 
 static esp_err_t control_handler(httpd_req_t *request)
 {
+    esp_err_t auth_err = require_authorized(request);
+    if (auth_err != ESP_OK) return auth_err;
     /* Desktop clients already use JSON. Reject browser form/text requests;
      * this blocks simple cross-origin POSTs but is not authentication. */
     char content_type[64];
@@ -352,6 +395,8 @@ static esp_err_t control_handler(httpd_req_t *request)
 
 static esp_err_t cir_handler(httpd_req_t *request)
 {
+    esp_err_t auth_err = require_authorized(request);
+    if (auth_err != ESP_OK) return auth_err;
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
 #ifndef CONFIG_UWB_CIR_ENABLE
@@ -469,6 +514,13 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
         config->buffer_length < 2 || config->sensing_interval_ms < 20 ||
         config->send_interval_ms < 50)
         return ESP_ERR_INVALID_ARG;
+    if (strlen(CONFIG_UWB_DEVICE_SECRET) != 64 ||
+        strspn(CONFIG_UWB_DEVICE_SECRET, "0123456789abcdefABCDEF") != 64) {
+        ESP_LOGE(TAG, "configure a unique 64-character hex device secret in menuconfig");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (samples || collector_task_handle || api_server)
+        return ESP_ERR_INVALID_STATE;
     snprintf(device_mac, sizeof(device_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
              config->device_id[0], config->device_id[1], config->device_id[2],
              config->device_id[3], config->device_id[4], config->device_id[5]);
@@ -487,17 +539,34 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
     if (!samples) return ESP_ERR_NO_MEM;
 
     if (xTaskCreatePinnedToCore(collector_task, "telemetry_buffer", 3072, NULL,
-                                4, NULL, network_core()) != pdPASS)
+                                4, &collector_task_handle, network_core()) != pdPASS) {
+        collector_task_handle = NULL;
+        vQueueDelete(samples);
+        samples = NULL;
         return ESP_ERR_NO_MEM;
+    }
 
-    httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
-    http_config.core_id = network_core();
-    http_config.stack_size = 6144;
-    http_config.lru_purge_enable = true;
-    http_config.max_uri_handlers = 4;
-    httpd_handle_t server = NULL;
-    ESP_RETURN_ON_ERROR(httpd_start(&server, &http_config), TAG,
-                        "HTTP server start");
+    esp_err_t err;
+#ifdef CONFIG_UWB_TLS_ENABLE
+    httpd_ssl_config_t https_config = HTTPD_SSL_CONFIG_DEFAULT();
+    https_config.httpd.core_id = network_core();
+    https_config.httpd.stack_size = 12288;
+    https_config.httpd.lru_purge_enable = true;
+    https_config.httpd.max_uri_handlers = 4;
+    https_config.servercert = device_cert_pem_start;
+    https_config.servercert_len = device_cert_pem_end - device_cert_pem_start;
+    https_config.prvtkey_pem = device_key_pem_start;
+    https_config.prvtkey_len = device_key_pem_end - device_key_pem_start;
+    https_config.port_secure = 443;
+    err = httpd_ssl_start(&api_server, &https_config);
+#else
+    ESP_LOGE(TAG, "HTTPS is disabled; set CONFIG_UWB_TLS_ENABLE and provide per-device certificate/key");
+    err = ESP_ERR_NOT_SUPPORTED;
+#endif
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP server start failed: %s", esp_err_to_name(err));
+        goto fail;
+    }
     const httpd_uri_t telemetry_uri = {
         .uri = "/api/telemetry",
         .method = HTTP_GET,
@@ -513,17 +582,33 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
         .method = HTTP_GET,
         .handler = cir_handler,
     };
-    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &telemetry_uri), TAG,
-                        "telemetry route");
-    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &control_uri), TAG,
-                        "control route");
-    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &cir_uri), TAG,
-                        "CIR route");
+    err = httpd_register_uri_handler(api_server, &telemetry_uri);
+    if (err != ESP_OK) goto fail;
+    err = httpd_register_uri_handler(api_server, &control_uri);
+    if (err != ESP_OK) goto fail;
+    err = httpd_register_uri_handler(api_server, &cir_uri);
+    if (err != ESP_OK) goto fail;
     if (xTaskCreatePinnedToCore(discovery_task, "mac_discovery", 3072, NULL,
                                 3, NULL, network_core()) != pdPASS)
         ESP_LOGW(TAG, "MAC discovery task unavailable; connect by IP");
 
-    ESP_LOGW(TAG, "dashboard API=http://%s MAC=%s cores=%d",
+    ESP_LOGI(TAG, "dashboard API=https://%s MAC=%s cores=%d",
              device_ip, device_mac, portNUM_PROCESSORS);
     return ESP_OK;
+
+fail:
+    ESP_LOGE(TAG, "telemetry service setup failed: %s", esp_err_to_name(err));
+    if (api_server) {
+        httpd_ssl_stop(api_server);
+        api_server = NULL;
+    }
+    if (collector_task_handle) {
+        vTaskDelete(collector_task_handle);
+        collector_task_handle = NULL;
+    }
+    if (samples) {
+        vQueueDelete(samples);
+        samples = NULL;
+    }
+    return err;
 }

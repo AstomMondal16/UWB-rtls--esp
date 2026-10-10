@@ -2,7 +2,6 @@
 import csv
 from collections import deque
 from datetime import datetime
-from http.client import HTTPConnection, HTTPException
 import json
 import math
 import queue
@@ -10,9 +9,9 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 
-from dashboard import BG, TEXT, MUTED, CYAN, AMBER, BORDER
+from dashboard import BG, TEXT, MUTED, CYAN, AMBER, BORDER, api_json
 
 POLL_SECONDS = 0.1
 TABLE_PAGE_SIZE = 64
@@ -45,22 +44,9 @@ def validate_cir(data):
     return data
 
 
-def fetch_cir(ip, connection=None):
-    own_connection = connection is None
-    connection = connection or HTTPConnection(ip, timeout=1.0)
-    try:
-        connection.request("GET", "/api/cir", headers={"Cache-Control": "no-cache"})
-        response = connection.getresponse()
-        if response.status != 200:
-            raise HTTPError(f"http://{ip}/api/cir", response.status,
-                            response.reason, response.headers, None)
-        body = response.read(32769)
-    finally:
-        if own_connection:
-            connection.close()
-    if len(body) > 32768:
-        raise ValueError("CIR response exceeds 32 KiB")
-    return validate_cir(json.loads(body))
+def fetch_cir(ip, device_id):
+    return validate_cir(api_json(f"https://{ip}/api/cir", device_id,
+                                 max_bytes=32768))
 
 
 def snapshot_key(data):
@@ -152,44 +138,34 @@ class CIRWindow(tk.Toplevel):
     def poll(self):
         sequence = 0
         cached_key, rows, table_rows = None, [], []
-        connection = None if self.demo else HTTPConnection(self.ip, timeout=1.0)
-        try:
-            while not self.stopped.is_set():
-                started = time.monotonic()
-                sequence += 1
-                data, error = None, ""
+        while not self.stopped.is_set():
+            started = time.monotonic()
+            sequence += 1
+            data, error = None, ""
+            try:
+                data = demo_cir(sequence) if self.demo else fetch_cir(self.ip, self.identity)
+            except (OSError, URLError, ValueError, RecursionError) as exc:
+                error = f"CIR unavailable: {exc}"
+            http_ms = (time.monotonic() - started) * 1000
+            key = snapshot_key(data)
+            if key != cached_key:
+                rows = cir_rows(data) if key is not None else []
+                table_rows = [(i, real, imag, f"{magnitude:.2f}")
+                              for i, real, imag, magnitude in rows]
+                cached_key = key
+            result = (data, error, rows, table_rows, http_ms)
+            try:
+                self.results.put_nowait(result)
+            except queue.Full:
                 try:
-                    data = demo_cir(sequence) if self.demo else fetch_cir(self.ip, connection)
-                except HTTPError as exc:
-                    error = ("CIR endpoint missing: rebuild and flash CIR-capable firmware."
-                             if exc.code == 404 else f"CIR HTTP error: {exc.code}")
-                except (OSError, URLError, HTTPException, ValueError, RecursionError) as exc:
-                    error = f"CIR unavailable: {exc}"
-                http_ms = (time.monotonic() - started) * 1000
-                if error and connection:
-                    connection.close()  # Reconnect on the next request after errors.
-                key = snapshot_key(data)
-                if key != cached_key:
-                    rows = cir_rows(data) if key is not None else []
-                    table_rows = [(i, real, imag, f"{magnitude:.2f}")
-                                  for i, real, imag, magnitude in rows]
-                    cached_key = key
-                result = (data, error, rows, table_rows, http_ms)
-                try:
-                    self.results.put_nowait(result)
-                except queue.Full:
-                    try:
-                        self.results.get_nowait()
-                    except queue.Empty:
-                        pass
-                    self.results.put_nowait(result)
-                # Include request/processing time in the period; never queue old frames.
-                period = 1.0 if error or key is None else POLL_SECONDS
-                if self.stopped.wait(max(0, period - (time.monotonic() - started))):
-                    break
-        finally:
-            if connection:
-                connection.close()
+                    self.results.get_nowait()
+                except queue.Empty:
+                    pass
+                self.results.put_nowait(result)
+            # Include request/processing time in the period; never queue old frames.
+            period = 1.0 if error or key is None else POLL_SECONDS
+            if self.stopped.wait(max(0, period - (time.monotonic() - started))):
+                break
 
     def refresh(self):
         self.refresh_id = None

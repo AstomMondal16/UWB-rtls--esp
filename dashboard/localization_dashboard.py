@@ -19,9 +19,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from tkinter import filedialog, messagebox, ttk
 from urllib.error import URLError
-from urllib.request import Request, urlopen
 
-from dashboard import (CALIBRATION_SAMPLES, Orientation, adjusted_zoom,
+from dashboard import (CALIBRATION_SAMPLES, MAX_CONTROL_BYTES,
+                       MAX_TELEMETRY_BYTES, Orientation, adjusted_zoom,
+                       api_json,
                        calibrated_antenna_delay, normalize_mac)
 from cir_viewer import CIRWindow
 
@@ -224,11 +225,9 @@ def discover_devices(timeout=0.8):
     return list(found.values())
 
 
-def fetch_telemetry(ip):
-    request = Request(f"http://{endpoint(ip)}/api/telemetry",
-                      headers={"Cache-Control": "no-cache"})
-    with urlopen(request, timeout=0.7) as response:
-        return json.load(response)
+def fetch_telemetry(ip, device_id):
+    return api_json(f"https://{endpoint(ip)}/api/telemetry", device_id,
+                    max_bytes=MAX_TELEMETRY_BYTES)
 
 
 class LocalizationDashboard:
@@ -571,7 +570,7 @@ class LocalizationDashboard:
                 for device in devices:
                     ip = device.get("ip") or discovered.get(device.get("mac"), {}).get("ip")
                     if ip:
-                        jobs[pool.submit(fetch_telemetry, ip)] = (record_key(device), ip)
+                        jobs[pool.submit(fetch_telemetry, ip, record_key(device))] = (record_key(device), ip)
                 for future in as_completed(jobs):
                     key, ip = jobs[future]
                     try:
@@ -992,10 +991,8 @@ class LocalizationDashboard:
         payload = json.dumps({"role": device["role"]}).encode()
         def send():
             try:
-                request = Request(f"http://{device['ip']}/api/control", data=payload,
-                                  headers={"Content-Type": "application/json"}, method="POST")
-                with urlopen(request, timeout=1) as response:
-                    json.load(response)
+                api_json(f"https://{device['ip']}/api/control", record_key(device),
+                         method="POST", body=payload, max_bytes=MAX_CONTROL_BYTES)
                 self.post("notice", f"Role applied to {record_key(device)}")
             except (OSError, URLError, ValueError) as error:
                 self.post("notice", f"Role update failed: {error}")
@@ -1029,10 +1026,8 @@ class LocalizationDashboard:
             succeeded = 0
             for device, ip in targets:
                 try:
-                    request = Request(f"http://{ip}/api/control", data=payload,
-                                      headers={"Content-Type": "application/json"}, method="POST")
-                    with urlopen(request, timeout=1) as response:
-                        json.load(response)
+                    api_json(f"https://{ip}/api/control", record_key(device),
+                             method="POST", body=payload, max_bytes=MAX_CONTROL_BYTES)
                     succeeded += 1
                 except (OSError, URLError, ValueError):
                     pass
@@ -1104,11 +1099,8 @@ class LocalizationDashboard:
             for anchor, ip, delay, _measured, _expected in updates:
                 try:
                     payload = json.dumps({"antenna_delay": delay}).encode()
-                    request = Request(f"http://{ip}/api/control", data=payload,
-                                      headers={"Content-Type": "application/json"},
-                                      method="POST")
-                    with urlopen(request, timeout=1) as response:
-                        json.load(response)
+                    api_json(f"https://{ip}/api/control", anchor,
+                             method="POST", body=payload, max_bytes=MAX_CONTROL_BYTES)
                 except (OSError, URLError, ValueError) as error:
                     failures.append(f"{anchor}: {error}")
             if failures:

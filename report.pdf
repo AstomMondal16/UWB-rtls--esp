@@ -1,0 +1,630 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+4 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R 10 0 R 12 0 R 14 0 R 16 0 R] /Count 6 >>
+endobj
+5 0 obj
+<< /Length 5453 >>
+stream
+0.080 0.160 0.280 rg
+0.00 801.89 595.28 40.00 re f
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 48.00 815.89 Tm (PCB V1  /  ENGINEERING REVIEW) Tj ET
+0.840 0.890 0.950 rg
+BT /F1 8.0 Tf 1 0 0 1 445.28 815.89 Tm (10 OCT 2026) Tj ET
+0.820 0.860 0.900 RG
+0.60 w 48.00 40.00 m 547.28 40.00 l S
+0.350 0.400 0.460 rg
+BT /F1 7.2 Tf 1 0 0 1 48.00 25.00 Tm (CONFIDENTIAL - INTERNAL ENGINEERING REVIEW) Tj ET
+0.350 0.400 0.460 rg
+BT /F2 7.2 Tf 1 0 0 1 502.28 25.00 Tm (PAGE 01) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 30.0 Tf 1 0 0 1 48.00 737.89 Tm (Firmware and App) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 30.0 Tf 1 0 0 1 48.00 701.89 Tm (Codebase Review) Tj ET
+0.120 0.360 0.620 rg
+BT /F1 12.0 Tf 1 0 0 1 48.00 676.89 Tm (Architecture, security, reliability and firmware footprint) Tj ET
+0.940 0.960 0.980 rg
+48.00 590.89 499.28 61.00 re f
+0.120 0.360 0.620 rg
+BT /F2 9.0 Tf 1 0 0 1 62.00 632.89 Tm (REVIEW DATE  10 October 2026) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 62.00 615.89 Tm (SCOPE  ESP-IDF firmware, Android app, desktop dashboards) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 62.00 600.89 Tm (METHOD  Static code and build-graph review; no files changed) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 555.89 Tm (Executive summary) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 549.89 m 547.28 549.89 l S
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 530.19 Tm (The project has a sensible component split for an ESP32-S3 product: Wi-Fi and provisioning, telemetry,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 517.50 Tm (UWB ranging, and sensor inputs are separated, with an Android app and desktop dashboards for setup and) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 504.80 Tm (monitoring. The expected small local-network deployment is a reasonable fit for this design.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 490.11 Tm (The largest risks are missing authentication on HTTP control and telemetry endpoints, unauthenticated) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 477.41 Tm (UWB ranging if measurements influence security decisions, and a Wi-Fi credential rollback path that can) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 464.71 Tm (clear recovery state after a failed restore. BLE provisioning also uses an empty proof-of-possession) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 452.02 Tm (value.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 437.32 Tm (Address access control and rollback recovery before using the device on a shared or untrusted network.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 424.63 Tm (Add bounded response handling and synchronized cross-task updates next. The review found no orphaned) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 411.93 Tm (firmware source component in the active ESP-IDF dependency graph.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 395.93 Tm (Main application flows) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 389.93 m 547.28 389.93 l S
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 370.78 Tm (- Firmware startup initializes board and sensor services, then starts Wi-Fi/provisioning, UWB ranging,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 358.63 Tm (and HTTP telemetry/control services.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 344.48 Tm (- The Android app discovers devices over UDP, polls telemetry over HTTP, and provides provisioning,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 332.33 Tm (configuration, calibration, and CSV collection flows.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 318.18 Tm (- Python dashboards discover devices and display or control telemetry; these are independent desktop) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 306.03 Tm (applications.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 290.03 Tm (Overall assessment) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 284.03 m 547.28 284.03 l S
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 264.33 Tm (The separation into components is sound and the bounded firmware telemetry queue is a good) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 251.64 Tm (resource-control choice. Several trust boundaries are still open, and some failure paths need stronger) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 238.94 Tm (recovery and cleanup. No evidence supports a claim that the firmware binary contains unused source) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 226.25 Tm (files; exact binary-size impact was not measured.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 210.25 Tm (Top priorities) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 204.25 m 547.28 204.25 l S
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 185.10 Tm (- Add per-device authentication and protected transport for HTTP controls and sensitive data.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 170.95 Tm (- Make credential rollback state durable until the previous Wi-Fi configuration has been restored) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 158.80 Tm (successfully.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 144.65 Tm (- Authenticate and freshness-protect UWB exchanges before relying on distance for security.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 130.50 Tm (- Use a non-empty per-device BLE proof of possession and bound network response sizes.) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 5600 >>
+stream
+0.080 0.160 0.280 rg
+0.00 801.89 595.28 40.00 re f
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 48.00 815.89 Tm (PCB V1  /  ENGINEERING REVIEW) Tj ET
+0.840 0.890 0.950 rg
+BT /F1 8.0 Tf 1 0 0 1 445.28 815.89 Tm (10 OCT 2026) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 20.0 Tf 1 0 0 1 48.00 751.89 Tm (Findings | Security and trust boundaries) Tj ET
+0.120 0.360 0.620 RG
+1.20 w 48.00 738.89 m 547.28 738.89 l S
+0.820 0.860 0.900 RG
+0.60 w 48.00 40.00 m 547.28 40.00 l S
+0.350 0.400 0.460 rg
+BT /F1 7.2 Tf 1 0 0 1 48.00 25.00 Tm (CONFIDENTIAL - INTERNAL ENGINEERING REVIEW) Tj ET
+0.350 0.400 0.460 rg
+BT /F2 7.2 Tf 1 0 0 1 502.28 25.00 Tm (PAGE 02) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 705.69 Tm (01. Unauthenticated HTTP control and data) Tj ET
+0.350 0.400 0.460 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 687.69 Tm (SEVERITY: HIGH - shared or untrusted LAN    |    LOCATION: components/telemetry/telemetry.c:493-521; control handler) Tj ET
+0.350 0.400 0.460 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 676.69 Tm (near 297-350) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 662.69 Tm (Evidence: The firmware registers /api/control, /api/telemetry, and /api/cir without authentication or TLS.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 650.69 Tm (The control handler accepts changes without checking caller identity.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 636.69 Tm (Why it matters: Any client that can reach the device may alter operating state or calibration and read) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 624.69 Tm (telemetry or CIR data. Calibration changes may also cause NVS writes.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 610.69 Tm (Recommended fix: Add per-device authorization and encrypted transport, and update the Android and desktop) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 598.69 Tm (clients together. Until then, keep devices on a trusted isolated network.) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 581.49 Tm (03. UWB frames have no cryptographic authentication) Tj ET
+0.350 0.400 0.460 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 563.49 Tm (SEVERITY: HIGH if distance is security-sensitive    |    LOCATION: components/uwb_ranging/uwb_ranging.c:183-235) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 549.49 Tm (Evidence: The receive path checks PAN, source, and frame length, but the reviewed exchange has no) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 537.49 Tm (cryptographic authentication or replay protection.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 523.49 Tm (Why it matters: A nearby transmitter may spoof or replay ranging messages. This matters if distance is used) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 511.49 Tm (to authorize access or trigger a safety action; the code alone does not establish that use.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 497.49 Tm (Recommended fix: Authenticate ranging exchanges with freshness and replay protection if distance has security) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 485.49 Tm (consequences. Otherwise document that the ranging result is not an adversarial security signal.) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 468.29 Tm (04. BLE provisioning uses an empty proof of possession) Tj ET
+0.700 0.420 0.080 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 450.29 Tm (SEVERITY: MEDIUM    |    LOCATION: components/ble_provisioning/ble_provisioning.c:90-91; Android) Tj ET
+0.700 0.420 0.080 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 439.29 Tm (MainActivity.kt:752-755) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 425.29 Tm (Evidence: Firmware selects Security 1 but passes NULL as the proof of possession; the app configures an empty) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 413.29 Tm (PoP. A physical GPIO17 button gates provisioning, but does not authenticate which nearby BLE client wins the) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 401.29 Tm (session.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 387.29 Tm (Why it matters: A nearby BLE client may race the intended phone after provisioning is opened.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 373.29 Tm (Recommended fix: Provision with a unique per-device PoP distributed through the authorized setup flow. Keep) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 361.29 Tm (the physical button as an additional presence check.) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 344.09 Tm (05. UDP discovery trusts an IP from the JSON payload) Tj ET
+0.700 0.420 0.080 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 326.09 Tm (SEVERITY: MEDIUM    |    LOCATION: android/app/src/main/java/.../DeviceRepository.kt:124, 157-160) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 312.09 Tm (Evidence: The app stores json.optString\("ip"\) before falling back to the UDP packet sender address, then) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 300.09 Tm (prefers the discovered IP for a saved MAC.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 286.09 Tm (Why it matters: A forged discovery packet can claim a known device MAC and redirect the app's subsequent HTTP) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 274.09 Tm (connection to an attacker-controlled address.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 260.09 Tm (Recommended fix: Use the UDP source address as the candidate IP, validate it, and verify device identity) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 248.09 Tm (before replacing a saved endpoint.) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Length 5281 >>
+stream
+0.080 0.160 0.280 rg
+0.00 801.89 595.28 40.00 re f
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 48.00 815.89 Tm (PCB V1  /  ENGINEERING REVIEW) Tj ET
+0.840 0.890 0.950 rg
+BT /F1 8.0 Tf 1 0 0 1 445.28 815.89 Tm (10 OCT 2026) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 20.0 Tf 1 0 0 1 48.00 751.89 Tm (Findings | Recovery, memory and concurrency) Tj ET
+0.120 0.360 0.620 RG
+1.20 w 48.00 738.89 m 547.28 738.89 l S
+0.820 0.860 0.900 RG
+0.60 w 48.00 40.00 m 547.28 40.00 l S
+0.350 0.400 0.460 rg
+BT /F1 7.2 Tf 1 0 0 1 48.00 25.00 Tm (CONFIDENTIAL - INTERNAL ENGINEERING REVIEW) Tj ET
+0.350 0.400 0.460 rg
+BT /F2 7.2 Tf 1 0 0 1 502.28 25.00 Tm (PAGE 03) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 705.69 Tm (02. Wi-Fi rollback can clear recovery state after restore failure) Tj ET
+0.700 0.420 0.080 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 687.69 Tm (SEVERITY: MEDIUM    |    LOCATION: components/wifi/wifi.c:166-178) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 673.69 Tm (Evidence: On provisioning failure, several storage/configuration return values are not checked, and) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 661.69 Tm (save_transaction\(restore, false\) is called regardless of whether the old configuration was restored and) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 649.69 Tm (persisted.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 635.69 Tm (Why it matters: If restoration fails, pending recovery state may still be cleared, leaving the device without) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 623.69 Tm (the previous working credentials.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 609.69 Tm (Recommended fix: Check every operation and clear the pending transaction only after the old configuration has) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 597.69 Tm (been successfully restored and saved. Log and surface recovery failure.) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 580.49 Tm (06. Android and desktop HTTP responses are unbounded) Tj ET
+0.700 0.420 0.080 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 562.49 Tm (SEVERITY: MEDIUM    |    LOCATION: Android DeviceRepository.kt:393-398; dashboard/dashboard.py:754-757) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 548.49 Tm (Evidence: The Android client reads the response fully with readText\(\); the desktop dashboard parses JSON) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 536.49 Tm (directly from the response without a byte limit.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 522.49 Tm (Why it matters: A large response from a faulty or hostile endpoint can consume excessive memory. CIR) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 510.49 Tm (responses may be especially large.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 496.49 Tm (Recommended fix: Enforce response byte limits before parsing. Use separate limits for ordinary telemetry and) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 484.49 Tm (CIR data, with explicit error handling.) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 467.29 Tm (07. volatile does not synchronize shared UWB control state) Tj ET
+0.700 0.420 0.080 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 449.29 Tm (SEVERITY: MEDIUM    |    LOCATION: components/uwb_ranging/uwb_ranging.c:61-105) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 435.29 Tm (Evidence: Role, pause, period, and antenna-delay state is shared using volatile. A new antenna-delay request) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 423.29 Tm (can arrive while an earlier apply is running, then be lost when the older operation clears the pending flag.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 409.29 Tm (Why it matters: volatile does not provide atomic coordination or ordering between tasks/cores, so updates can) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 397.29 Tm (be missed or observed inconsistently.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 383.29 Tm (Recommended fix: Send updates through a FreeRTOS queue or protect a short state snapshot/update with the) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 371.29 Tm (appropriate critical section or mutex.) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 354.09 Tm (08. Android CSV collection can grow to a large in-memory buffer) Tj ET
+0.700 0.420 0.080 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 336.09 Tm (SEVERITY: MEDIUM    |    LOCATION: Android DeviceRepository.kt:225-230 and csv\(\) near 324) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 322.09 Tm (Evidence: The app retains up to 100,000 serialized rows in memory, repeats device configuration with rows,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 310.09 Tm (and constructs the full CSV output afterward.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 296.09 Tm (Why it matters: Large sessions can use substantial memory and may cause Android out-of-memory termination.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 282.09 Tm (Recommended fix: Stream rows to a file or use a byte-based limit and chunked export. Avoid repeating) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 270.09 Tm (invariant device configuration in every stored row.) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 9 0 R >>
+endobj
+11 0 obj
+<< /Length 5644 >>
+stream
+0.080 0.160 0.280 rg
+0.00 801.89 595.28 40.00 re f
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 48.00 815.89 Tm (PCB V1  /  ENGINEERING REVIEW) Tj ET
+0.840 0.890 0.950 rg
+BT /F1 8.0 Tf 1 0 0 1 445.28 815.89 Tm (10 OCT 2026) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 20.0 Tf 1 0 0 1 48.00 751.89 Tm (Findings | Startup and test coverage) Tj ET
+0.120 0.360 0.620 RG
+1.20 w 48.00 738.89 m 547.28 738.89 l S
+0.820 0.860 0.900 RG
+0.60 w 48.00 40.00 m 547.28 40.00 l S
+0.350 0.400 0.460 rg
+BT /F1 7.2 Tf 1 0 0 1 48.00 25.00 Tm (CONFIDENTIAL - INTERNAL ENGINEERING REVIEW) Tj ET
+0.350 0.400 0.460 rg
+BT /F2 7.2 Tf 1 0 0 1 502.28 25.00 Tm (PAGE 04) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 705.69 Tm (09. Telemetry startup can leave partial services running) Tj ET
+0.700 0.420 0.080 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 687.69 Tm (SEVERITY: MEDIUM    |    LOCATION: components/telemetry/telemetry.c:486-521; main/main.c:379-381) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 673.69 Tm (Evidence: Queue and collector setup occurs before HTTP server and route registration. Later startup errors) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 661.69 Tm (return without unwinding earlier resources; main logs the error and continues.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 647.69 Tm (Why it matters: The device can remain in a partially initialized state without a clear retry or degraded-mode) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 635.69 Tm (policy. Repeated attempts may leak resources if startup is retried.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 621.69 Tm (Recommended fix: On each startup failure, stop and release resources created so far, or make initialization) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 609.69 Tm (idempotent. Report which services are degraded and add a defined retry policy.) Tj ET
+0.120 0.360 0.620 rg
+BT /F2 11.2 Tf 1 0 0 1 48.00 592.49 Tm (10. Android tests are placeholders; firmware coverage is unclear) Tj ET
+0.350 0.400 0.460 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 574.49 Tm (SEVERITY: LOW-MEDIUM    |    LOCATION: android/app/src/test/.../ExampleUnitTest.kt;) Tj ET
+0.350 0.400 0.460 rg
+BT /F1 8.1 Tf 1 0 0 1 48.00 563.49 Tm (android/app/src/androidTest/.../ExampleInstrumentedTest.kt) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 549.49 Tm (Evidence: The unit test checks basic arithmetic and the instrumentation test checks the package name. No) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 537.49 Tm (tracked firmware test target was identified during this review. Python dashboards provide a --self-test) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 525.49 Tm (option.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 511.49 Tm (Why it matters: The current tests do not exercise discovery, credential persistence, calibration, ranging) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 499.49 Tm (math, rollback, or CSV limits.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 485.49 Tm (Recommended fix: Add focused tests for the risky flows listed above, plus a firmware test target for) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 473.49 Tm (transaction recovery and shared state. This finding describes coverage observed in the repository, not proof) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 8.8 Tf 1 0 0 1 48.00 461.49 Tm (that no external tests exist.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 441.49 Tm (Code flow and design notes) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 435.49 m 547.28 435.49 l S
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 415.79 Tm (The component boundaries are understandable and match the product's main responsibilities. The Android) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 403.10 Tm (app and desktop dashboards are separate clients, so protocol changes to authentication, discovery,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 390.40 Tm (provisioning, or CSV behavior need coordinated updates. The user-visible provisioning action must also) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 377.71 Tm (be coordinated with Wi-Fi and UWB task state.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 363.01 Tm (The main design gap is inconsistent failure handling across subsystem boundaries: services may partially) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 350.31 Tm (start, and credential restoration does not appear to guard transaction cleanup on every failure. Define) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 337.62 Tm (explicit service states and recovery outcomes so the app can tell connected, provisioning, and degraded) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 324.92 Tm (modes apart.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 308.92 Tm (Uncertainty boundaries) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 302.92 m 547.28 302.92 l S
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 283.77 Tm (- The risk of unauthenticated UWB traffic depends on whether distance is used for access, safety, or) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 271.62 Tm (other security-sensitive decisions.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 257.47 Tm (- The unauthenticated HTTP exposure is most severe on shared or untrusted networks; the review assumes) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 245.32 Tm (no additional network-layer isolation.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 231.17 Tm (- No linker map or compiled binary was available for a precise retained-byte measurement.) Tj ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 11 0 R >>
+endobj
+13 0 obj
+<< /Length 5590 >>
+stream
+0.080 0.160 0.280 rg
+0.00 801.89 595.28 40.00 re f
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 48.00 815.89 Tm (PCB V1  /  ENGINEERING REVIEW) Tj ET
+0.840 0.890 0.950 rg
+BT /F1 8.0 Tf 1 0 0 1 445.28 815.89 Tm (10 OCT 2026) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 20.0 Tf 1 0 0 1 48.00 751.89 Tm (Files and firmware size) Tj ET
+0.120 0.360 0.620 RG
+1.20 w 48.00 738.89 m 547.28 738.89 l S
+0.820 0.860 0.900 RG
+0.60 w 48.00 40.00 m 547.28 40.00 l S
+0.350 0.400 0.460 rg
+BT /F1 7.2 Tf 1 0 0 1 48.00 25.00 Tm (CONFIDENTIAL - INTERNAL ENGINEERING REVIEW) Tj ET
+0.350 0.400 0.460 rg
+BT /F2 7.2 Tf 1 0 0 1 502.28 25.00 Tm (PAGE 05) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 702.89 Tm (What is in the active ESP-IDF build) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 696.89 m 547.28 696.89 l S
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 677.19 Tm (The root and main CMake files, together with component idf_component_register\(\) declarations, were) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 664.50 Tm (followed as a dependency graph. The active firmware path reaches battery_monitor, mpu6050, telemetry,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 651.80 Tm (uwb_ranging, wifi, ble_provisioning, and dw1000 through the main component's dependencies.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 637.11 Tm (No orphaned firmware C source was identified from this graph. A source file not compiled into a target) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 624.41 Tm (contributes zero bytes to the firmware image.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 608.41 Tm (Files and directories outside the firmware build) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 602.41 m 547.28 602.41 l S
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 583.26 Tm (- tag/tag.ino and anchor/anchor.ino are Arduino sketches and are not part of the ESP-IDF source graph) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 571.11 Tm (checked. They may be reference or alternate-build material; deleting them would not reduce this firmware) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 558.96 Tm (image.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 544.81 Tm (- android/ and dashboard/ are separate application projects. Their code does not enter the ESP-IDF) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 532.66 Tm (binary.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 518.51 Tm (- checkpoints/ contains historical snapshots and patches, not CMake inputs. It can be excluded from a) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 506.36 Tm (firmware delivery package, but removing it from source control would remove rollback history.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 492.21 Tm (- android/app/src/main/keepRules/rules.keep appears unreferenced by the reviewed Gradle configuration.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 480.06 Tm (It has no ESP firmware size impact.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 465.91 Tm (- Reports, images, IDE settings, generated caches, and build outputs do not enter the firmware unless) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 453.76 Tm (explicitly added to a build target. The desktop logo is referenced by the dashboard.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 437.76 Tm (Configuration-dependent size) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 431.76 m 547.28 431.76 l S
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 412.06 Tm (The CIR implementation is conditionally built and defaults off in Kconfig. If disabled, its conditional) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 399.37 Tm (code is omitted; enabling it adds code and associated runtime data. No map file or final binary was) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 386.67 Tm (inspected, so this report does not estimate retained bytes.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 370.67 Tm (Removal guidance) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 364.67 m 547.28 364.67 l S
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 344.98 Tm (For firmware packaging, it is safe to omit files that are not reachable from the selected ESP-IDF build,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 332.28 Tm (while keeping documentation and checkpoint history in the repository when they are useful to developers.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 319.58 Tm (Before deleting any file, verify references in CMake, Kconfig, scripts, Gradle, IDE configuration, and) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 306.89 Tm (alternate build workflows.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 290.89 Tm (How unused code was checked) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 284.89 m 547.28 284.89 l S
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 265.74 Tm (- Followed root CMake and main/CMakeLists.txt component declarations.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 251.59 Tm (- Followed each registered firmware component's CMake dependencies and conditional source lists.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 237.44 Tm (- Checked references and build/configuration roles for the named Arduino sketches, checkpoint directory,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 225.29 Tm (Android keep rules, and dashboard assets.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 211.14 Tm (- Did not build, run tests, inspect a linker map, or measure an image-size delta.) Tj ET
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 13 0 R >>
+endobj
+15 0 obj
+<< /Length 6234 >>
+stream
+0.080 0.160 0.280 rg
+0.00 801.89 595.28 40.00 re f
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 48.00 815.89 Tm (PCB V1  /  ENGINEERING REVIEW) Tj ET
+0.840 0.890 0.950 rg
+BT /F1 8.0 Tf 1 0 0 1 445.28 815.89 Tm (10 OCT 2026) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 20.0 Tf 1 0 0 1 48.00 751.89 Tm (Prioritized remediation and validation) Tj ET
+0.120 0.360 0.620 RG
+1.20 w 48.00 738.89 m 547.28 738.89 l S
+0.820 0.860 0.900 RG
+0.60 w 48.00 40.00 m 547.28 40.00 l S
+0.350 0.400 0.460 rg
+BT /F1 7.2 Tf 1 0 0 1 48.00 25.00 Tm (CONFIDENTIAL - INTERNAL ENGINEERING REVIEW) Tj ET
+0.350 0.400 0.460 rg
+BT /F2 7.2 Tf 1 0 0 1 502.28 25.00 Tm (PAGE 06) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 702.89 Tm (Recommended order) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 696.89 m 547.28 696.89 l S
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 677.74 Tm (- 1. Protect HTTP controls and sensitive endpoints with per-device authentication and encrypted) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 665.59 Tm (transport; update all clients in the same protocol change.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 651.44 Tm (- 2. Repair Wi-Fi transaction recovery so pending state is cleared only after verified restoration and) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 639.29 Tm (persistence.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 625.14 Tm (- 3. Add non-empty per-device BLE proof of possession. Test the physical-button-to-provisioning flow) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 612.99 Tm (with the authorized phone and with a second nearby BLE client.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 598.84 Tm (- 4. If range drives a security decision, add authenticated, replay-resistant UWB exchanges. Otherwise) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 586.69 Tm (clearly limit the meaning of range data.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 572.54 Tm (- 5. Bound HTTP response sizes in Android and Python clients, especially for CIR payloads. Add) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 560.39 Tm (large-response failure tests.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 546.24 Tm (- 6. Replace cross-task volatile control updates with a queue or protected snapshot; test simultaneous) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 534.09 Tm (update requests.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 519.94 Tm (- 7. Make telemetry startup unwind partial resources or retry safely; test failures at each) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 507.79 Tm (initialization step.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 493.64 Tm (- 8. Stream or cap Android CSV collection, then test a long session against a memory budget.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 479.49 Tm (- 9. Add targeted tests for discovery identity, saved credentials, calibration, rollback, ranging math,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 467.34 Tm (and export.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 451.34 Tm (Checks needed before release) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 445.34 m 547.28 445.34 l S
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 426.19 Tm (- Confirm whether firmware HTTP endpoints are reachable beyond an isolated trusted network. Verify all) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 414.04 Tm (clients enforce the same authentication scheme.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 399.89 Tm (- Exercise provisioning failure with an invalid hotspot and verify the prior working credentials remain) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 387.74 Tm (usable after reboot.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 373.59 Tm (- Test GPIO17 provisioning while ranging and normal Wi-Fi tasks are active; verify deterministic) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 361.44 Tm (transition and restoration.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 347.29 Tm (- Inject HTTP server, route-registration, and allocation failures and confirm startup cleanup and retry) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 335.14 Tm (behavior.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 320.99 Tm (- Test spoofed UDP discovery, oversized HTTP responses, repeated antenna-delay updates, and long CSV) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 308.84 Tm (sessions.) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.0 Tf 1 0 0 1 56.00 294.69 Tm (- If security depends on ranging, conduct a protocol review and adversarial replay/spoof test.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 278.69 Tm (Review limits) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 272.69 m 547.28 272.69 l S
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 252.99 Tm (This is a static repository review based on the files and build declarations available on 10 October) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 240.30 Tm (2026. No files were changed as part of the review. No firmware/app build, automated tests, device tests,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 227.60 Tm (linker-map inspection, or network penetration tests were run. Findings describe code evidence and) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 214.91 Tm (conditional impact; deployment exposure and external test coverage may change prioritization.) Tj ET
+0.080 0.160 0.280 rg
+BT /F2 14.0 Tf 1 0 0 1 48.00 198.91 Tm (Final assessment) Tj ET
+0.820 0.860 0.900 RG
+0.45 w 48.00 192.91 m 547.28 192.91 l S
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 173.21 Tm (Keep the current component-oriented architecture. Prioritize access control and dependable recovery,) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 160.51 Tm (then address resource bounds, task synchronization, and test coverage. Firmware size cleanup should be) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 147.82 Tm (based on the selected build graph and measured linker output rather than deleting reference or) Tj ET
+0.130 0.170 0.220 rg
+BT /F1 9.2 Tf 1 0 0 1 48.00 135.12 Tm (historical source files.) Tj ET
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 15 0 R >>
+endobj
+17 0 obj
+<< /Type /Catalog /Pages 4 0 R >>
+endobj
+xref
+0 18
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000160 00000 n 
+0000000228 00000 n 
+0000000319 00000 n 
+0000005823 00000 n 
+0000005975 00000 n 
+0000011626 00000 n 
+0000011778 00000 n 
+0000017110 00000 n 
+0000017263 00000 n 
+0000022959 00000 n 
+0000023113 00000 n 
+0000028755 00000 n 
+0000028909 00000 n 
+0000035195 00000 n 
+0000035349 00000 n 
+trailer
+<< /Size 18 /Root 17 0 R >>
+startxref
+35399
+%%EOF

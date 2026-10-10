@@ -53,6 +53,16 @@ static esp_err_t write_station_config(wifi_config_t *config)
     return err;
 }
 
+static esp_err_t restore_station_config(const wifi_config_t *config)
+{
+    esp_err_t err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, (wifi_config_t *)config);
+    if (err == ESP_OK) err = esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, (wifi_config_t *)config);
+    if (err == ESP_OK) err = save_transaction(config, false);
+    return err;
+}
+
 static esp_err_t load_menuconfig_credentials(wifi_config_t *config)
 {
     if (!config) return ESP_ERR_INVALID_ARG;
@@ -155,7 +165,12 @@ static void provisioning_event(ble_provisioning_event_t event, const void *data,
         if (err == ESP_OK) err = save_transaction(&current, false);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "could not commit Wi-Fi credentials: %s", esp_err_to_name(err));
-            if (previous_valid) write_station_config(&previous_config);
+            wifi_config_t empty = {0};
+            const wifi_config_t *restore = previous_valid ? &previous_config : &empty;
+            esp_err_t restore_err = restore_station_config(restore);
+            if (restore_err != ESP_OK)
+                ESP_LOGE(TAG, "Wi-Fi rollback failed; recovery remains pending: %s",
+                         esp_err_to_name(restore_err));
         } else {
             ESP_LOGI(TAG, "provisioned Wi-Fi connection succeeded");
             if (xTaskCreate(stop_provisioning_task, "prov_stop", 2048, NULL, 3, NULL) != pdPASS) {
@@ -164,22 +179,26 @@ static void provisioning_event(ble_provisioning_event_t event, const void *data,
             }
         }
     } else if (event == BLE_PROVISIONING_CREDENTIALS_FAILED) {
-        retry_saved_network = previous_valid;
+        retry_saved_network = false;
         ESP_LOGW(TAG, "new Wi-Fi credentials failed; restoring previous network");
         wifi_config_t empty = {0};
-        wifi_config_t *restore = previous_valid ? &previous_config : &empty;
-        if (esp_wifi_set_storage(WIFI_STORAGE_RAM) == ESP_OK) {
-            esp_wifi_set_config(WIFI_IF_STA, restore);
-            esp_wifi_set_storage(WIFI_STORAGE_FLASH);
-            write_station_config(restore);
-            if (previous_valid) esp_wifi_connect();
+        const wifi_config_t *restore = previous_valid ? &previous_config : &empty;
+        esp_err_t err = restore_station_config(restore);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Wi-Fi rollback failed; recovery remains pending: %s",
+                     esp_err_to_name(err));
+        } else if (previous_valid) {
+            retry_saved_network = true;
+            esp_wifi_connect();
+            xEventGroupSetBits(events, RETRY);
         }
-        save_transaction(restore, false);
-        if (previous_valid) xEventGroupSetBits(events, RETRY);
     } else if (event == BLE_PROVISIONING_START_FAILED) {
         const esp_err_t *start_error = data;
         wifi_config_t backup = previous_valid ? previous_config : (wifi_config_t){0};
-        save_transaction(&backup, false);
+        esp_err_t restore_err = restore_station_config(&backup);
+        if (restore_err != ESP_OK)
+            ESP_LOGE(TAG, "could not clear provisioning rollback after start failure: %s",
+                     esp_err_to_name(restore_err));
         ESP_LOGE(TAG, "BLE provisioning start failed: %s",
                  start_error ? esp_err_to_name(*start_error) : "unknown error");
     } else if (event == BLE_PROVISIONING_STOPPED) {

@@ -5,6 +5,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -14,6 +15,9 @@
 #define BUTTON_GPIO GPIO_NUM_17
 #define BUTTON_RETRY_LIMIT 150
 #define BUTTON_RETRY_DELAY_MS 100
+#ifndef CONFIG_UWB_DEVICE_SECRET
+#define CONFIG_UWB_DEVICE_SECRET ""
+#endif
 
 static const char *TAG = "ble_provisioning";
 static SemaphoreHandle_t request_sem;
@@ -88,7 +92,8 @@ static void request_task(void *arg)
 
             active = true; /* Keep Wi-Fi callbacks from reconnecting during startup. */
             err = network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1,
-                                                       NULL, service_name, NULL);
+                                                       CONFIG_UWB_DEVICE_SECRET,
+                                                       service_name, NULL);
             if (err == ESP_OK) {
                 started = true;
                 ESP_LOGI(TAG, "BLE provisioning requested as %s", service_name);
@@ -138,6 +143,11 @@ esp_err_t ble_provisioning_init(const char *name,
 {
     if (!name || name[0] == '\0' || strlen(name) >= sizeof(service_name))
         return ESP_ERR_INVALID_ARG;
+    if (strlen(CONFIG_UWB_DEVICE_SECRET) != 64 ||
+        strspn(CONFIG_UWB_DEVICE_SECRET, "0123456789abcdefABCDEF") != 64) {
+        ESP_LOGE(TAG, "configure a unique 64-character hex device secret in menuconfig");
+        return ESP_ERR_INVALID_ARG;
+    }
     if (request_sem) return ESP_ERR_INVALID_STATE;
 
     network_prov_mgr_config_t config = {

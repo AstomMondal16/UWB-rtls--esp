@@ -4,9 +4,19 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -20,8 +30,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 private const val DISCOVERY_TTL_MS = 4_500L
+private const val MAX_TELEMETRY_BYTES = 32 * 1024
+private const val MAX_CIR_BYTES = 64 * 1024
+private const val MAX_CONTROL_BYTES = 8 * 1024
+private const val MAX_COLLECTION_BYTES = 4 * 1024 * 1024
 
 class DeviceRepository(context: Context, private val changed: (DashboardSnapshot) -> Unit) {
+    private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("uwb_localization", Context.MODE_PRIVATE)
     private val main = Handler(Looper.getMainLooper())
     private val workers = Executors.newScheduledThreadPool(2)
@@ -34,6 +49,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private val states = mutableMapOf<String, DeviceState>()
     private val ranges = mutableMapOf<Pair<String, String>, RangeReading>()
     private val collected = ArrayDeque<String>()
+    private var collectedBytes = 0
     private var collecting = false
     private data class CalibrationTarget(val ip: String, val delay: Int, val expected: Double,
                                          val samples: MutableList<Double> = mutableListOf(),
@@ -119,9 +135,10 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                                     continue
                                 }
                                 val mac = normalizeMac(json.optString("mac"))
-                                if (mac.isNotBlank()) synchronized(lock) {
+                                val sourceIp = (response.address as? Inet4Address)?.hostAddress.orEmpty()
+                                if (mac.isNotBlank() && sourceIp.isNotBlank()) synchronized(lock) {
                                     discovered[mac] = FoundDevice(mac,
-                                        json.optString("ip").ifBlank { response.address.hostAddress.orEmpty() },
+                                        sourceIp,
                                         json.optString("role", "unknown"), System.currentTimeMillis())
                                 }
                             }
@@ -157,7 +174,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
             val ip = discoveredIp.ifBlank { device.ip }
             if (ip.isNotBlank() && polling.add(device.key)) pollWorkers.execute {
                 try {
-                    val sample = getJson("http://$ip/api/telemetry")
+                    val sample = getJson("https://$ip/api/telemetry", device.mac.ifBlank { device.ip })
                     sample.put("_received_at", System.currentTimeMillis())
                     accept(device, ip, sample)
                 } catch (e: Exception) {
@@ -176,6 +193,10 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private fun accept(device: DeviceRecord, ip: String, sample: JSONObject) = synchronized(lock) {
         val oldKey = device.key
         val mac = normalizeMac(sample.optString("mac")).ifBlank { device.mac }
+        if (device.mac.isNotBlank() && mac != device.mac) {
+            status = "Device identity mismatch for ${device.mac}"
+            return@synchronized
+        }
         if (mac.isNotBlank() && device.mac != mac) {
             val index = devices.indexOfFirst { it.key == oldKey }
             if (index >= 0) {
@@ -226,8 +247,14 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                 put("source_address", source); put("source_ip", ip)
                 put("dashboard_devices", encodeDevices(devices))
             }.toString()
-            if (collected.size >= 100_000) collected.removeFirst()
-            collected.addLast(row)
+            val rowBytes = row.toByteArray(StandardCharsets.UTF_8).size
+            if (rowBytes <= MAX_COLLECTION_BYTES) {
+                while (collected.isNotEmpty() && collectedBytes + rowBytes > MAX_COLLECTION_BYTES) {
+                    collectedBytes -= collected.removeFirst().toByteArray(StandardCharsets.UTF_8).size
+                }
+                collected.addLast(row)
+                collectedBytes += rowBytes
+            }
         }
         if (calibration.isNotEmpty() && calibration.values.all { it.samples.size >= 100 }) finishCalibration()
     }
@@ -268,7 +295,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     fun setCollecting(value: Boolean) {
         synchronized(lock) {
             if (value && devices.isEmpty()) { status = "Add a device before collecting"; publish(); return }
-            if (value) collected.clear()
+            if (value) { collected.clear(); collectedBytes = 0 }
             collecting = value
             status = if (value) "Data collection running" else "Data collection stopped · ${collected.size} samples"
         }
@@ -313,7 +340,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         if (results.isEmpty()) { status = "Calibration failed: calculated delay outside 0..65535"; return }
         status = "Applying calibrated antenna delays…"
         results.forEach { (mac, target, delay) ->
-            postControl(target.ip, JSONObject().put("antenna_delay", delay)) {
+            postControl(target.ip, JSONObject().put("antenna_delay", delay), mac) {
                 val ordered = target.samples.sorted()
                 val measured = (ordered[ordered.size / 2] + ordered[(ordered.size - 1) / 2]) / 2
                 setStatus("Calibrated $mac · ${"%.3f".format(measured)} → ${"%.3f".format(target.expected)} m")
@@ -322,34 +349,45 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     }
 
     fun csv(): String = synchronized(lock) {
-        val records = collected.mapNotNull { runCatching { JSONObject(it) }.getOrNull() }
-        if (records.isEmpty()) return@synchronized ""
+        if (collected.isEmpty()) return@synchronized ""
+        val first = runCatching { JSONObject(collected.first()) }.getOrNull()
+            ?: return@synchronized ""
         val fields = linkedSetOf<String>().apply {
-            add("source_address"); add("source_ip"); addAll(records.flatMap { o -> (0 until o.length()).map { o.names()?.optString(it) ?: "" } })
+            add("source_address"); add("source_ip")
+            addAll((0 until first.length()).map { first.names()?.optString(it) ?: "" })
         }.filter { it.isNotBlank() }
         buildString {
             append(fields.joinToString(",") { csvEscape(it) }).append('\n')
-            records.forEach { row -> append(fields.joinToString(",") { key -> csvEscape(row.opt(key)?.toString().orEmpty()) }).append('\n') }
+            collected.forEach { encoded ->
+                val row = runCatching { JSONObject(encoded) }.getOrNull() ?: return@forEach
+                append(fields.joinToString(",") { key -> csvEscape(row.opt(key)?.toString().orEmpty()) }).append('\n')
+            }
         }
     }
 
-    fun getCir(ip: String, callback: (JSONObject?, String?) -> Unit) {
+    fun getCir(ip: String, deviceId: String, callback: (JSONObject?, String?) -> Unit) {
         pollWorkers.execute {
-            val result = runCatching { getJson("http://$ip/api/cir") }
+            val result = runCatching { getJson("https://$ip/api/cir", deviceId, MAX_CIR_BYTES) }
             main.post { callback(result.getOrNull(), result.exceptionOrNull()?.let { "CIR request failed: ${it.message}" }) }
         }
     }
 
-    fun postControl(ip: String, data: JSONObject, callback: (String) -> Unit = {}) {
+    fun postControl(ip: String, data: JSONObject, deviceId: String? = null,
+                    callback: (String) -> Unit = {}) {
         workers.execute {
             val result = runCatching {
-                val connection = URL("http://$ip/api/control").openConnection() as HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.connectTimeout = 1000; connection.readTimeout = 1500
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.outputStream.use { it.write(data.toString().toByteArray(StandardCharsets.UTF_8)) }
-                connection.inputStream.bufferedReader().use { it.readText() }
+                val id = deviceId ?: synchronized(lock) {
+                    devices.firstOrNull { it.ip == ip }?.mac?.ifBlank { ip } ?: ip
+                }
+                val connection = openApiConnection("https://$ip/api/control", id)
+                try {
+                    connection.requestMethod = "POST"
+                    connection.connectTimeout = 1000; connection.readTimeout = 1500
+                    connection.doOutput = true
+                    connection.setRequestProperty("Content-Type", "application/json")
+                    connection.outputStream.use { it.write(data.toString().toByteArray(StandardCharsets.UTF_8)) }
+                    readLimited(connection, MAX_CONTROL_BYTES)
+                } finally { connection.disconnect() }
             }.getOrElse { "Control failed: ${it.message}" }
             setStatus(result)
             main.post { callback(result) }
@@ -364,8 +402,8 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                         states[device.key]?.sample?.optString("ip").orEmpty()
                     }
                 }
-                ip.takeIf { it.isNotBlank() }
-            }.distinct()
+                ip.takeIf { it.isNotBlank() }?.let { (device.mac.ifBlank { device.ip }) to it }
+            }.distinctBy { it.second }
         }
         if (targets.isEmpty()) {
             setStatus("Add a device with an IP address before starting tracking")
@@ -373,29 +411,83 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         }
         workers.execute {
             var succeeded = 0
-            targets.forEach { ip ->
+            targets.forEach { (deviceId, ip) ->
                 runCatching {
-                    val connection = URL("http://$ip/api/control").openConnection() as HttpURLConnection
-                    connection.requestMethod = "POST"
-                    connection.connectTimeout = 1000; connection.readTimeout = 1500
-                    connection.doOutput = true
-                    connection.setRequestProperty("Content-Type", "application/json")
-                    connection.outputStream.use {
-                        it.write(JSONObject().put("streaming", value).toString().toByteArray(StandardCharsets.UTF_8))
-                    }
-                    connection.inputStream.use { it.readBytes() }
+                    val connection = openApiConnection("https://$ip/api/control", deviceId)
+                    try {
+                        connection.requestMethod = "POST"
+                        connection.connectTimeout = 1000; connection.readTimeout = 1500
+                        connection.doOutput = true
+                        connection.setRequestProperty("Content-Type", "application/json")
+                        connection.outputStream.use {
+                            it.write(JSONObject().put("streaming", value).toString().toByteArray(StandardCharsets.UTF_8))
+                        }
+                        readLimited(connection, MAX_CONTROL_BYTES)
+                    } finally { connection.disconnect() }
                 }.onSuccess { succeeded++ }
             }
             setStatus("Tracking ${if (value) "started" else "paused"} on $succeeded/${targets.size} devices")
         }
     }
 
-    private fun getJson(address: String): JSONObject {
-        val connection = URL(address).openConnection() as HttpURLConnection
+    private fun getJson(address: String, deviceId: String,
+                        maxBytes: Int = MAX_TELEMETRY_BYTES): JSONObject {
+        val connection = openApiConnection(address, deviceId)
         connection.connectTimeout = 700; connection.readTimeout = 900
         connection.setRequestProperty("Cache-Control", "no-cache")
-        return try { JSONObject(connection.inputStream.bufferedReader().use { it.readText() }) }
+        return try { JSONObject(readLimited(connection, maxBytes)) }
         finally { connection.disconnect() }
+    }
+
+    private fun readLimited(connection: HttpURLConnection, maxBytes: Int): String {
+        if (connection.contentLengthLong > maxBytes) throw IOException("HTTP response exceeds $maxBytes bytes")
+        val output = ByteArrayOutputStream(minOf(maxBytes, 4096))
+        connection.inputStream.use { input ->
+            val buffer = ByteArray(4096)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (output.size() + count > maxBytes) throw IOException("HTTP response exceeds $maxBytes bytes")
+                output.write(buffer, 0, count)
+            }
+        }
+        return output.toString(StandardCharsets.UTF_8.name())
+    }
+
+    private fun openApiConnection(address: String, deviceId: String): HttpsURLConnection {
+        val credentials = LastWifiCredentialStore.loadDeviceSecurity(appContext, deviceId)
+        val apiKey = credentials.apiKey.trim()
+        val pin = credentials.tlsFingerprint.filterNot { it == ':' || it.isWhitespace() }
+            .uppercase(java.util.Locale.ROOT)
+        require(apiKey.length == 64 && apiKey.all { it.digitToIntOrNull(16) != null }) {
+            "Enter the 64-character API key for $deviceId"
+        }
+        require(pin.length == 64 && pin.all { it.digitToIntOrNull(16) != null }) {
+            "Enter the TLS certificate fingerprint for $deviceId"
+        }
+        val expected = pin.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        fun matches(certificate: X509Certificate): Boolean =
+            MessageDigest.isEqual(MessageDigest.getInstance("SHA-256").digest(certificate.encoded), expected)
+        val trustManager = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+                throw CertificateException("Client certificates are not used")
+            }
+            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+                if (chain.isEmpty() || !matches(chain[0]))
+                    throw CertificateException("Device certificate fingerprint mismatch")
+                chain[0].checkValidity()
+            }
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        val tls = SSLContext.getInstance("TLS")
+        tls.init(null, arrayOf(trustManager), SecureRandom())
+        val connection = URL(address).openConnection() as HttpsURLConnection
+        connection.sslSocketFactory = tls.socketFactory
+        connection.hostnameVerifier = HostnameVerifier { _, session ->
+            (session.peerCertificates.firstOrNull() as? X509Certificate)?.let(::matches) == true
+        }
+        connection.setRequestProperty("Authorization", "Bearer $apiKey")
+        return connection
     }
 
     fun close() { workers.shutdownNow(); pollWorkers.shutdownNow() }

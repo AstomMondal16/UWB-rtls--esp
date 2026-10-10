@@ -264,7 +264,7 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
     fun requestCir(deviceKey: String, ip: String) {
         if (cirLoading) return
         cirLoading = true
-        repo.getCir(ip) { data, error ->
+        repo.getCir(ip, chosen?.let { it.mac.ifBlank { it.ip } }.orEmpty()) { data, error ->
             if (cirDeviceKey == deviceKey) {
                 if (data != null) cirData = data
                 cirError = error.orEmpty()
@@ -460,11 +460,18 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
         },
         onDismiss = { configOpen = false })
     if (wifiProvisionOpen) WifiProvisioningDialog(onDismiss = { wifiProvisionOpen = false })
-    if (editorOpen) DeviceEditorDialog(editing, onDismiss = { editorOpen = false; configOpen = true }, onSave = { record ->
+    if (editorOpen) DeviceEditorDialog(editing,
+        initialSecurity = LastWifiCredentialStore.loadDeviceSecurity(context,
+            editing?.let { it.mac.ifBlank { it.ip } }.orEmpty()),
+        onDismiss = { editorOpen = false; configOpen = true }, onSave = { record, apiKey, fingerprint ->
         val error = repo.upsert(record, editing?.key)
         if (error == null) {
-            if (record.ip.isNotBlank()) repo.postControl(record.ip, JSONObject().put("role", record.role))
-            editorOpen = false; configOpen = true
+            if (!LastWifiCredentialStore.saveDeviceSecurity(context, record.mac.ifBlank { record.ip }, apiKey, fingerprint)) {
+                repo.setStatus("Could not securely save device credentials")
+            } else {
+                if (record.ip.isNotBlank()) repo.postControl(record.ip, JSONObject().put("role", record.role), record.mac)
+                editorOpen = false; configOpen = true
+            }
         } else repo.setStatus(error)
     })
     if (clearConfirm) AlertDialog(onDismissRequest = { clearConfirm = false }, title = { Text("Clear configured devices?") },
@@ -552,7 +559,7 @@ private fun ConfigurationDialog(snapshot: DashboardSnapshot, names: Map<String, 
                             onEdit = { onEdit(device) }, onDelete = { repo.remove(device.key) },
                             onApplyRole = {
                                 if (device.ip.isBlank()) repo.setStatus("Scan or add an IP before applying the role")
-                                else repo.postControl(device.ip, JSONObject().put("role", device.role))
+                                else repo.postControl(device.ip, JSONObject().put("role", device.role), device.mac)
                             })
                     }
                     val available = snapshot.discovered.filter { found ->
@@ -595,8 +602,9 @@ private fun ConfigurationDialog(snapshot: DashboardSnapshot, names: Map<String, 
 
 
 private data class SavedWifiCredentials(val ssid: String = "", val password: String = "")
+internal data class DeviceSecurity(val apiKey: String = "", val tlsFingerprint: String = "")
 
-private object LastWifiCredentialStore {
+internal object LastWifiCredentialStore {
     private const val PREFS = "wifi_provisioning"
     private const val VALUE = "last_credentials"
     private const val KEY_ALIAS = "uwb_wifi_credentials_v1"
@@ -633,6 +641,47 @@ private object LastWifiCredentialStore {
     } catch (_: Exception) {
         false
     }
+
+    fun loadDeviceSecurity(context: android.content.Context, mac: String): DeviceSecurity {
+        val value = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .getString("device_${deviceIdentity(mac)}", null) ?: return DeviceSecurity()
+        return try {
+            val packed = Base64.decode(value, Base64.NO_WRAP)
+            require(packed.size > IV_LENGTH)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(),
+                GCMParameterSpec(128, packed.copyOfRange(0, IV_LENGTH)))
+            val json = JSONObject(String(cipher.doFinal(packed.copyOfRange(IV_LENGTH, packed.size)), Charsets.UTF_8))
+            DeviceSecurity(json.optString("api_key"), json.optString("tls_fingerprint"))
+        } catch (_: Exception) {
+            context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+                .remove("device_${deviceIdentity(mac)}").apply()
+            DeviceSecurity()
+        }
+    }
+
+    fun saveDeviceSecurity(context: android.content.Context, mac: String,
+                           apiKey: String, tlsFingerprint: String): Boolean = try {
+        val key = "device_${deviceIdentity(mac)}"
+        if (apiKey.isBlank() && tlsFingerprint.isBlank()) {
+            context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+                .remove(key).apply()
+        } else {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+            val plaintext = JSONObject().put("api_key", apiKey.trim())
+                .put("tls_fingerprint", tlsFingerprint.trim()).toString().toByteArray(Charsets.UTF_8)
+            val packed = cipher.iv + cipher.doFinal(plaintext)
+            context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+                .putString(key, Base64.encodeToString(packed, Base64.NO_WRAP)).apply()
+        }
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun deviceIdentity(value: String): String =
+        normalizeMac(value).ifBlank { value.trim().lowercase(Locale.ROOT) }
 
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -676,6 +725,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     val savedCredentials = remember { LastWifiCredentialStore.load(context) }
     var ssid by remember { mutableStateOf(savedCredentials.ssid) }
     var password by remember { mutableStateOf(savedCredentials.password) }
+    var deviceSecret by remember { mutableStateOf("") }
     LaunchedEffect(ssid, password) {
         delay(300)
         LastWifiCredentialStore.save(context, ssid, password)
@@ -740,6 +790,11 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                 }
                 Text("Connect to the device over Bluetooth, then send its Wi-Fi credentials.",
                     color = Muted, fontSize = 12.sp)
+                OutlinedTextField(value = deviceSecret, onValueChange = { deviceSecret = it },
+                    label = { Text("64-character device setup key") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth())
                 OutlinedButton(onClick = scan, enabled = !scanning, modifier = Modifier.fillMaxWidth()) {
                     Text(if (scanning) "Scanning…" else "Scan for UWB devices")
                 }
@@ -751,7 +806,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                                 status = "Connecting to " + (target.device.name ?: "UWB device") + "…"
                                 val esp = manager.createESPDevice(ESPConstants.TransportType.TRANSPORT_BLE,
                                     ESPConstants.SecurityType.SECURITY_1)
-                                esp.setProofOfPossession("")
+                                esp.setProofOfPossession(deviceSecret.trim())
                                 esp.setBluetoothDevice(target.device)
                                 esp.setPrimaryServiceUuid(target.serviceUuid)
                                 activeDevice = esp
@@ -774,6 +829,10 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                 Button(onClick = {
                     LastWifiCredentialStore.save(context, ssid, password)
                     val esp = activeDevice
+                    if (deviceSecret.trim().length != 64 || deviceSecret.trim().any { it.digitToIntOrNull(16) == null }) {
+                        status = "Enter the 64-character device key from the developer"
+                        return@Button
+                    }
                     if (esp == null || !bleConnected || ssid.isBlank()) {
                         status = if (esp == null || !bleConnected) "Select and connect to a device first" else "Enter the Wi-Fi network name"
                         return@Button
@@ -790,10 +849,10 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                         }
                         override fun wifiConfigApplied() { status = "Credentials received; testing the Wi-Fi connection…" }
                         override fun wifiConfigApplyFailed(e: Exception) {
-                            sending = false; status = "Wi-Fi connection failed. Any previously saved network has been restored."
+                            sending = false; status = "Wi-Fi connection failed. Device attempted to restore its previous network; verify its connection."
                         }
                         override fun provisioningFailedFromDevice(failureReason: ESPConstants.ProvisionFailureReason) {
-                            sending = false; status = "Wi-Fi connection failed (" + failureReason + "). Any saved network was restored."
+                            sending = false; status = "Wi-Fi connection failed (" + failureReason + "). Device attempted to restore its previous network; verify its connection."
                         }
                         override fun deviceProvisioningSuccess() {
                             sending = false; status = "Wi-Fi connected. Device setup is complete."
@@ -1137,7 +1196,8 @@ private fun SectionCard(title: String, headerAction: (@Composable () -> Unit)? =
 
 @Composable
 private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
-                               onSave: (DeviceRecord) -> Unit) {
+                               initialSecurity: DeviceSecurity,
+                               onSave: (DeviceRecord, String, String) -> Unit) {
     var mac by remember(device) { mutableStateOf(device?.mac.orEmpty()) }
     var ip by remember(device) { mutableStateOf(device?.ip.orEmpty()) }
     var role by remember(device) { mutableStateOf(device?.role ?: "anchor") }
@@ -1145,6 +1205,8 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
     var y by remember(device) { mutableStateOf(device?.y?.toString() ?: "0") }
     var z by remember(device) { mutableStateOf(device?.z?.toString() ?: "0") }
     var yaw by remember(device) { mutableStateOf(device?.yawOffset?.toString() ?: "0") }
+    var apiKey by remember(device) { mutableStateOf(initialSecurity.apiKey) }
+    var tlsFingerprint by remember(device) { mutableStateOf(initialSecurity.tlsFingerprint) }
     var error by remember { mutableStateOf("") }
     fun record(): DeviceRecord? {
         val values = listOf(x.toDoubleOrNull(), y.toDoubleOrNull(), z.toDoubleOrNull(), yaw.toDoubleOrNull())
@@ -1169,10 +1231,26 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
                     NumericField("Z (m)", z, { z = it }, Modifier.weight(1f))
                     NumericField("Yaw offset°", yaw, { yaw = it }, Modifier.weight(1f))
                 }
+                OutlinedTextField(apiKey, { apiKey = it }, label = { Text("64-character device API key") },
+                    singleLine = true, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(tlsFingerprint, { tlsFingerprint = it },
+                    label = { Text("TLS certificate SHA-256 fingerprint") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth())
                 if (error.isNotBlank()) Text(error, color = Red, fontSize = 12.sp)
             }
         },
-        confirmButton = { TextButton(onClick = { record()?.let(onSave) }) { Text("Save") } },
+        confirmButton = { TextButton(onClick = {
+            val key = apiKey.trim()
+            val fingerprint = tlsFingerprint.filterNot { it == ':' || it.isWhitespace() }
+            if (key.length != 64 || key.any { it.digitToIntOrNull(16) == null }) {
+                error = "Enter the 64-character API key configured for this device"; return@TextButton
+            }
+            if (fingerprint.length != 64 || fingerprint.any { it.digitToIntOrNull(16) == null }) {
+                error = "Enter the device certificate SHA-256 fingerprint"; return@TextButton
+            }
+            record()?.let { onSave(it, key, fingerprint.uppercase(Locale.ROOT)) }
+        }) { Text("Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
