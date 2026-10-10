@@ -1,15 +1,15 @@
-# Android App Security Warning: UWB Localization
+# Android App Security Finding: OnePlus Fake-App Detection
 
-**Status:** Investigation and remediation plan. No transport-security fix has been implemented yet.
-**Last updated:** 2026-09-30
+**Status:** Detection recorded; cause not established. Network-security remediation remains separate.
+**Last updated:** 2026-10-05
 
 ## Summary
 
-On a Huawei phone, Phone Manager displayed: “Risks detected with ‘UWB Localization’ … This app may lead to serious risks such as privacy breaches and financial loss.” This is a system security warning, not a notification created by the app UI.
+On a OnePlus Nord CE 5 running OxygenOS 16.0.5, the built-in security scan reports one high risk. The screenshot names it `Android.Riskware.Deceptive.FakeApp.ADW.FMYY.AppImppers` and alleges that the app imitates another app. This is the scanner's classification, not evidence that the app actually impersonates another app.
 
-The app and UWB devices currently communicate over the local network using UDP discovery and plain HTTP. The Android app explicitly permits cleartext traffic. The firmware's HTTP control endpoint also has no client authentication. These facts create real network risks and are plausible reasons for a broad security scanner warning, but the phone's exact detection reason is not available from the screenshot. Do not claim that this specific configuration is definitely the scanner's sole trigger.
+The user suspects the app's HTTP traffic caused the warning. The repository does use cleartext HTTP and has a separate, genuine network-security weakness, but the screenshot's deceptive/fake-app classification does not identify HTTP as its reason. Keep these as separate findings unless OnePlus provides evidence linking them.
 
-Huawei's security documentation describes scanning user-installed apps and displaying warnings when a risk is detected. The exact checks and wording can vary by Phone Manager, EMUI/HarmonyOS version, and scan result: [Huawei Mobile Services security white paper](https://consumer.huawei.com/dam/content/dam/huawei-cbg-site/common/mkt/privacy/overview-new/downen/huawei-mobile-services-%28hms%29-security-technical-white-paper-v2.0.pdf).
+The Android project currently uses the default-looking application ID `com.example.myapplication`, while its visible name and custom launcher icon identify it as UWB Localization. This identity mismatch is worth correcting before broader distribution, but it is only a possible contributing factor; it does not establish why the scan matched. Android source review found no obvious app-masquerading or dynamic-code-loading implementation. Source review cannot prove the exact APK that was installed is clean or explain the vendor scanner's signature.
 
 ## What the current code does
 
@@ -27,6 +27,7 @@ The control handler checks the JSON content type and validates control values. I
 
 - `android/app/src/main/AndroidManifest.xml` declares `INTERNET`, `ACCESS_NETWORK_STATE`, and `ACCESS_LOCAL_NETWORK`.
 - The same manifest sets `android:usesCleartextTraffic="true"` for the whole app.
+- `android/app/build.gradle.kts` sets both namespace and application ID to `com.example.myapplication`; the app label is `UWB Localization` and the launcher icon is a custom UWB/location design.
 - `DeviceRepository.kt` uses plain HTTP for telemetry, CIR, and control requests, plus UDP broadcast discovery.
 - `components/telemetry/telemetry.c` serves the endpoints with `esp_http_server`; `/api/control` does not authenticate the caller.
 - `dashboard/localization_dashboard.py`, `dashboard/dashboard.py`, and `dashboard/cir_viewer.py` also use the HTTP API.
@@ -34,11 +35,11 @@ The control handler checks the JSON content type and validates control values. I
 
 ### Not yet known
 
-- Which exact rule Phone Manager matched.
-- Whether the phone flags the app because it was installed as a development/sideloaded APK, because of network behavior, or for another reason.
-- Whether a secure transport-only build will clear the warning. A code change cannot guarantee Huawei will remove a scan result.
+- Why the OnePlus scanner matched this exact detection, whether it is a false positive, and which APK/signature or reputation data it analyzed.
+- Whether a default application ID, debug/sideloaded build, signing identity, icon/name similarity, or another property contributed. These are investigation leads, not confirmed causes.
+- Whether changing app identity or signing a release build will clear the warning. Only a rescan of the exact resulting APK on the affected phone can establish that.
 
-To identify the phone's specific reason, open **Fix now** and inspect the app entry under Phone Manager's scan/risk details. Record the exact reason and phone OS/security-app version. Do not disable phone security globally to hide the message.
+The screenshot already provides the risk name and alleged behavior. To continue diagnosis, record the APK's origin and build type, its package ID and signing-certificate fingerprint, and the OnePlus security-app version. Keep the APK used for the scan so its identity can be checked against the build. Do not treat an allowlist action as a diagnosis or claim a code change clears the finding until the phone is rescanned.
 
 ## Why the current setup has security risk
 
@@ -47,15 +48,24 @@ To identify the phone's specific reason, open **Fix now** and inspect the app en
 - **Discovery trust:** UDP broadcast replies are not authenticated. Discovery should locate a device, but must not be treated as proof that the responding device is genuine.
 - **Distribution trust:** A locally built or sideloaded APK may be treated differently from an app installed through a trusted store. This is a possible contributing factor, not a confirmed diagnosis.
 
-## Recommended fix
+## Recommended actions
 
-The real fix is a coordinated protocol change across the ESP firmware, Android app, and Python clients. Simply setting `usesCleartextTraffic` to `false` will break the current HTTP calls; it does not convert them to HTTPS.
+### Investigate the deceptive-app finding
+
+1. Confirm the installed package ID and signing certificate for the exact APK that triggered the alert, and record how that APK was built and delivered.
+2. Before distributing beyond development, replace the template application ID with an identifier controlled by the project owner, and use a consistent project name and release signing key. Changing an application ID installs as a different Android app, so decide this before relying on upgrades or stored app data.
+3. Rebuild and rescan that exact signed APK on the OnePlus. If the same detection remains and the app has no impersonation behavior, submit the APK and detection label to OnePlus/OPlus security support for review. Do not promise that package renaming or signing alone removes a vendor detection.
+
+Android uses `applicationId` as the app's device/store identity; changing it changes the app identity. Release updates also depend on a consistent signing key. See [Android application ID documentation](https://developer.android.com/build/configure-app-module) and [Android app signing documentation](https://developer.android.com/studio/publish/app-signing).
+
+### Address the separate local-network risk
+
+The HTTP exposure remains real, but changing it is not a targeted fix for the screenshot's fake-app classification. The network remediation is a coordinated protocol change across ESP firmware, Android, and Python clients. Simply setting `usesCleartextTraffic` to `false` will break current calls; it does not convert them to HTTPS.
 
 ### Phase 1 — Confirm the alert
 
-1. Read the exact Phone Manager finding under **Fix now**.
-2. Record APK source (Android Studio/debug or signed release), app version, phone model, and EMUI/HarmonyOS/Phone Manager version.
-3. Keep the warning text separate from facts verified in this repository. A generic warning is not proof that the app stole data, but it should not be dismissed without reviewing its details.
+1. Preserve the exact screenshot finding, APK source/build type, app version, phone model, and OxygenOS/security-app version.
+2. Keep the scanner's claim separate from facts verified in this repository. A risk label is not proof of malicious behavior, but it should be investigated rather than attributed to HTTP without evidence.
 
 ### Phase 2 — Encrypt and authenticate device traffic
 
@@ -68,7 +78,7 @@ The real fix is a coordinated protocol change across the ESP firmware, Android a
 ### Phase 3 — Release and recheck
 
 1. Build a release APK signed with the project's intended release key; protect and back up that key.
-2. Install the release build and retest Phone Manager. If it still flags the app, use the recorded scan details and Huawei's review/support process; signing or TLS alone may not change the scanner's decision.
+2. Install the release build and retest the OnePlus scan. If it still flags the app, use the recorded detection details and OnePlus/OPlus review process; a transport change is not expected to address a fake-app signature by itself.
 
 ## Acceptance criteria for a future implementation
 
@@ -78,7 +88,7 @@ The real fix is a coordinated protocol change across the ESP firmware, Android a
 - HTTP requests to device APIs fail after migration; no broad cleartext exception remains.
 - UDP discovery cannot be used by itself to impersonate a trusted device.
 - Firmware memory use and connection behavior are checked on actual ESP hardware.
-- Phone Manager's exact result is recorded after installing the signed release; warning removal is reported only if it is actually observed.
+- The OnePlus risk result is recorded after installing the exact signed release; warning removal is reported only if it is actually observed.
 
 ## Files to inspect when continuing
 
@@ -92,8 +102,8 @@ The real fix is a coordinated protocol change across the ESP firmware, Android a
 
 ## Handoff for a future AI assistant
 
-Read this report and the files above before changing the protocol. First inspect the current branch because code may have changed since this report. Preserve Android, Python dashboard, and CIR viewer compatibility as one migration. Do not claim the Huawei warning is fixed until tested on the affected phone. Do not silence the warning, remove required network permissions, disable TLS verification, or turn off cleartext before the device firmware and all clients have a working authenticated HTTPS path. Ask for device certificate/pairing constraints only if the repository and hardware setup do not establish a safe choice.
+Read this report and the files above before changing the protocol. First inspect the current branch because code may have changed since this report. Preserve Android, Python dashboard, and CIR viewer compatibility as one migration. Do not claim the OnePlus fake-app detection is fixed until the exact signed APK is rescanned on the affected phone. Do not describe HTTP as the trigger without evidence. Do not remove required network permissions, disable TLS verification, or turn off cleartext before the firmware and every client have a working authenticated HTTPS path. Ask for a project-owned Android application ID and device certificate/pairing constraints only when needed for those respective changes.
 
 
-screenshort:
-C:\Users\Astom\Desktop\codes\pcb_v1\Screenshot_20260930_001125.png
+
+Screenshot evidence: user-provided OnePlus Nord CE 5 security-scan screen (OxygenOS 16.0.5).

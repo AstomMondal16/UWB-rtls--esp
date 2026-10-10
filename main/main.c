@@ -23,6 +23,7 @@
 
 static const char *TAG = "UWB";
 static wifi_info_t network;
+static volatile bool wifi_connected = false;
 #define RANGE_FILTER_COUNT 8
 typedef struct {
     bool used;
@@ -81,9 +82,9 @@ static void apply_dashboard_control(bool streaming, uint32_t sensing_interval_ms
                                     uint16_t antenna_delay, const char *role)
 {
     /* Pause only UWB/IMU acquisition; Wi-Fi and the HTTP control server stay up. */
-    uwb_ranging_set_paused(!streaming);
+    uwb_ranging_set_paused(!streaming || !wifi_connected);
 #ifdef CONFIG_UWB_MPU6050_ENABLE
-    imu_streaming = streaming;
+    imu_streaming = streaming && wifi_connected;
 #endif
     uwb_ranging_set_period(sensing_interval_ms);
     uwb_ranging_set_antenna_delay(antenna_delay);
@@ -295,6 +296,19 @@ static void on_range(const uwb_ranging_peer_t *peer)
              sample.battery_voltage, sample.battery_percent);
 }
 
+static void on_wifi_connection_changed(bool connected, void *arg)
+{
+    (void)arg;
+    wifi_connected = connected;
+    uwb_ranging_set_paused(!connected);
+#ifdef CONFIG_UWB_MPU6050_ENABLE
+    imu_streaming = connected;
+#endif
+    ESP_LOGI(TAG, "Wi-Fi %s; sensor acquisition %s",
+             connected ? "connected" : "disconnected",
+             connected ? "resumed" : "paused");
+}
+
 static void sensing_task(void *argument)
 {
     (void)argument;
@@ -338,6 +352,7 @@ static void sensing_task(void *argument)
 
 void app_main(void)
 {
+    wifi_set_connection_callback(on_wifi_connection_changed, NULL);
     esp_err_t err = wifi_connect(&network);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi connection failed: %s", esp_err_to_name(err));

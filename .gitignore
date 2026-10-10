@@ -20,6 +20,8 @@
 **/build/
 build/
 .gradle/
+.gradle-home/
+.android-user/
 *.o
 *.a
 *.out

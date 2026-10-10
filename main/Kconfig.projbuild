@@ -19,6 +19,13 @@ config UWB_WIFI_PASSWORD
     string "Wi-Fi password"
     default ""
 
+config UWB_BLE_DEVICE_ID
+    string "BLE provisioning device ID suffix (optional)"
+    default ""
+    help
+        Override the suffix after PROV_ in the BLE provisioning name.
+        Leave blank to use the last three bytes of the device MAC address.
+
 menu "DW1000 GPIO pins"
 
 config UWB_DW1000_SCK_GPIO

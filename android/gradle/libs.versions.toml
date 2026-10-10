@@ -8,8 +8,12 @@ lifecycleRuntimeKtx = "2.11.0"
 activityCompose = "1.13.0"
 kotlin = "2.2.10"
 composeBom = "2026.02.01"
+espressifProvisioning = "lib-2.4.4"
+eventBus = "3.3.1"
 
 [libraries]
+eventbus = { group = "org.greenrobot", name = "eventbus", version.ref = "eventBus" }
+espressif-provisioning = { group = "com.github.espressif", name = "esp-idf-provisioning-android", version.ref = "espressifProvisioning" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }

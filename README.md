@@ -1,4 +1,4 @@
-# ESP32 + AI-Thinker BU01 UWB ranging and MPU6050 IMU
+﻿# ESP32 + AI-Thinker BU01 UWB ranging and MPU6050 IMU
 
 Native ESP-IDF anchor/tag firmware ported from the frame flow used by
 [thotro/arduino-dw1000](https://github.com/thotro/arduino-dw1000). It uses the
@@ -27,7 +27,8 @@ also carried in bytes 80-85 of the existing 90-byte Arduino ranging frame.
 - `components/uwb_ranging`: Arduino-compatible discovery and asymmetric TWR.
 - `components/mpu6050`: I2C accelerometer and gyroscope driver.
 - `components/battery_monitor`: calibrated ADC1 battery voltage and percentage.
-- `components/wifi`: Wi-Fi connection and station-MAC identity.
+- `components/ble_provisioning`: BLE provisioning manager and GPIO17 button request task.
+- `components/wifi`: saved Wi-Fi credentials, connection/recovery, and station-MAC identity.
 - `components/telemetry`: sample queue, HTTP API and UDP MAC discovery.
 - `main`: Kconfig values, callbacks and startup ordering.
 - `dashboard/dashboard.py`: standalone Python desktop visualization.
@@ -94,11 +95,17 @@ idf.py set-target esp32s3
 idf.py menuconfig
 ```
 
-Under `UWB ranging`, set the Wi-Fi SSID/password and select the startup `Tag`
-or `Anchor` role. Use the same PAN ID, antenna delay and reply delay on both
-devices. By default, this menuconfig role is applied on every boot. The
-dashboard can change the running role at any time; after a reboot the device
-returns to its menuconfig role. Dashboard role changes are never stored in NVS.
+Under `UWB ranging`, select the startup `Tag` or `Anchor` role. The firmware
+uses saved Wi-Fi credentials first. If none exist, it uses the SSID and
+password configured in menuconfig and saves them to NVS. BLE provisioning
+starts only when those menuconfig fields are blank. The
+Android app opens this from `Device Configuration` > `Set up device Wi-Fi with
+Bluetooth`. Press the active-low button on GPIO17 (button to GND) to provision
+or replace the saved network. Failed replacement credentials restore the prior network when one was saved.
+Use the same PAN ID, antenna delay and reply delay on both devices. By default,
+this menuconfig role is applied on every boot. The dashboard can change the
+running role at any time; after a reboot the device returns to its menuconfig
+role. Dashboard role changes are never stored in NVS.
 
 ```text
 idf.py build

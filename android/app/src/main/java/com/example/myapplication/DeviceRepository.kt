@@ -7,7 +7,10 @@ import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
@@ -74,38 +77,73 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private fun scan() {
         if (!scanning.compareAndSet(false, true)) return
         try {
-            DatagramSocket().use { socket ->
-                socket.broadcast = true
-                socket.soTimeout = 180
-                val bytes = "UWB_DISCOVER".toByteArray(StandardCharsets.UTF_8)
-                val packet = DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), 4210)
-                repeat(4) {
-                    socket.send(packet)
-                    val until = System.currentTimeMillis() + 250
-                    while (System.currentTimeMillis() < until) {
-                        try {
-                            val buffer = ByteArray(512)
-                            val response = DatagramPacket(buffer, buffer.size)
-                            socket.receive(response)
-                            val json = JSONObject(String(response.data, 0, response.length, StandardCharsets.UTF_8))
-                            val mac = normalizeMac(json.optString("mac"))
-                            if (mac.isNotBlank()) synchronized(lock) {
-                                discovered[mac] = FoundDevice(mac,
-                                    json.optString("ip").ifBlank { response.address.hostAddress.orEmpty() },
-                                    json.optString("role", "unknown"), System.currentTimeMillis())
-                            }
-                        } catch (_: java.net.SocketTimeoutException) { break }
-                        catch (_: Exception) { }
+            val targets = mutableListOf<Pair<InetAddress?, InetAddress>>()
+            try {
+                val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+                    .filter { it.isUp && !it.isLoopback }
+                for (networkInterface in interfaces) {
+                    for (interfaceAddress in networkInterface.interfaceAddresses) {
+                        val local = interfaceAddress.address as? Inet4Address ?: continue
+                        val broadcast = interfaceAddress.broadcast as? Inet4Address ?: continue
+                        targets.add(local to broadcast)
                     }
+                }
+            } catch (e: Exception) {
+                synchronized(lock) { status = "Could not inspect network interfaces: " + (e.message ?: "network error") }
+            }
+            targets.add(null to InetAddress.getByName("255.255.255.255"))
+
+            val bytes = "UWB_DISCOVER".toByteArray(StandardCharsets.UTF_8)
+            var socketError: String? = null
+            for ((localAddress, broadcastAddress) in targets.distinctBy { it.first?.hostAddress to it.second.hostAddress }) {
+                try {
+                    DatagramSocket(null as java.net.SocketAddress?).use { socket ->
+                        socket.broadcast = true
+                        socket.soTimeout = 180
+                        socket.bind(if (localAddress == null) InetSocketAddress(0) else InetSocketAddress(localAddress, 0))
+                        val packet = DatagramPacket(bytes, bytes.size, broadcastAddress, 4210)
+                        repeat(4) {
+                            socket.send(packet)
+                            val until = System.currentTimeMillis() + 250
+                            while (System.currentTimeMillis() < until) {
+                                val buffer = ByteArray(512)
+                                val response = DatagramPacket(buffer, buffer.size)
+                                try {
+                                    socket.receive(response)
+                                } catch (_: java.net.SocketTimeoutException) {
+                                    break
+                                }
+                                val json = try {
+                                    JSONObject(String(response.data, 0, response.length, StandardCharsets.UTF_8))
+                                } catch (_: org.json.JSONException) {
+                                    continue
+                                }
+                                val mac = normalizeMac(json.optString("mac"))
+                                if (mac.isNotBlank()) synchronized(lock) {
+                                    discovered[mac] = FoundDevice(mac,
+                                        json.optString("ip").ifBlank { response.address.hostAddress.orEmpty() },
+                                        json.optString("role", "unknown"), System.currentTimeMillis())
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    socketError = e.message ?: e.javaClass.simpleName
                 }
             }
             synchronized(lock) {
                 val now = System.currentTimeMillis()
                 discovered.entries.removeAll { now - it.value.lastSeenAtMs > DISCOVERY_TTL_MS }
-                status = "Scan complete · ${discovered.size} found"
+                status = if (discovered.isNotEmpty()) "Scan complete · " + discovered.size + " found"
+                    else if (socketError != null) "Scan failed: " + socketError
+                    else "Scan complete · 0 found after checking " + targets.size + " broadcast target(s)"
             }
-        } catch (e: Exception) { synchronized(lock) { status = "Scan failed: ${e.message ?: "network error"}" } }
-        finally { scanning.set(false); publish() }
+        } catch (e: Exception) {
+            synchronized(lock) { status = "Scan failed: " + (e.message ?: "network error") }
+        } finally {
+            scanning.set(false)
+            publish()
+        }
     }
 
     private fun poll() {
