@@ -9,7 +9,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "mbedtls/md.h"
+#include "psa/crypto.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -70,6 +70,7 @@ typedef struct {
 
 static const char *TAG = "uwb_ranging";
 static uint8_t auth_key[32];
+static psa_key_id_t auth_key_id;
 static uint32_t tx_auth_sequence;
 static uint32_t get_u32(const uint8_t *in);
 static void put_u32(uint8_t *out, uint32_t value);
@@ -176,15 +177,34 @@ static esp_err_t load_auth_key(void)
         if (high < 0 || low < 0) return ESP_ERR_INVALID_ARG;
         auth_key[i] = (uint8_t)((high << 4) | low);
     }
+    if (psa_crypto_init() != PSA_SUCCESS) return ESP_FAIL;
+
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
+    psa_set_key_algorithm(&attributes, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
+    psa_set_key_bits(&attributes, sizeof(auth_key) * 8);
+    psa_status_t status = psa_import_key(&attributes, auth_key, sizeof(auth_key),
+                                         &auth_key_id);
+    psa_reset_key_attributes(&attributes);
+    memset(auth_key, 0, sizeof(auth_key));
+    if (status != PSA_SUCCESS) return ESP_FAIL;
     return ESP_OK;
+}
+
+static bool compute_auth_digest(const uint8_t *input, size_t input_length,
+                               uint8_t digest[32])
+{
+    size_t digest_length = 0;
+    return psa_mac_compute(auth_key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256),
+                           input, input_length, digest, 32,
+                           &digest_length) == PSA_SUCCESS && digest_length == 32;
 }
 
 static bool sign_frame(uint8_t frame[FRAME_LEN])
 {
-    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     uint8_t digest[32];
-    if (!md || mbedtls_md_hmac(md, auth_key, sizeof(auth_key), frame,
-                               AUTH_TAG_OFFSET, digest) != 0)
+    if (!compute_auth_digest(frame, AUTH_TAG_OFFSET, digest))
         return false;
     memcpy(frame + AUTH_TAG_OFFSET, digest, AUTH_TAG_LEN);
     memset(digest, 0, sizeof(digest));
@@ -194,10 +214,8 @@ static bool sign_frame(uint8_t frame[FRAME_LEN])
 static bool verify_frame(const uint8_t *frame, size_t length)
 {
     if (length != FRAME_LEN) return false;
-    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     uint8_t digest[32];
-    if (!md || mbedtls_md_hmac(md, auth_key, sizeof(auth_key), frame,
-                               AUTH_TAG_OFFSET, digest) != 0)
+    if (!compute_auth_digest(frame, AUTH_TAG_OFFSET, digest))
         return false;
     uint8_t difference = 0;
     for (unsigned i = 0; i < AUTH_TAG_LEN; ++i)
@@ -761,7 +779,6 @@ esp_err_t uwb_ranging_run(const uwb_ranging_config_t *config)
         runtime_antenna_delay = config->antenna_delay;
         antenna_delay_initialized = true;
     }
-    uwb_ranging_role_t initial_role = runtime_role;
     uint16_t initial_antenna_delay = runtime_antenna_delay;
     portEXIT_CRITICAL(&runtime_lock);
     ranging_context_t ctx = {.config = *config};

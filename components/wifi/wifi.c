@@ -46,6 +46,8 @@ static void notify_connection(bool connected)
     if (connection_cb) connection_cb(connected, connection_arg);
 }
 
+static esp_err_t save_transaction(const wifi_config_t *config, bool pending);
+
 static esp_err_t write_station_config(wifi_config_t *config)
 {
     esp_err_t err = esp_wifi_set_storage(WIFI_STORAGE_FLASH);
@@ -55,11 +57,13 @@ static esp_err_t write_station_config(wifi_config_t *config)
 
 static esp_err_t restore_station_config(const wifi_config_t *config)
 {
+    if (!config) return ESP_ERR_INVALID_ARG;
+    wifi_config_t restored = *config;
     esp_err_t err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, (wifi_config_t *)config);
+    if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, &restored);
     if (err == ESP_OK) err = esp_wifi_set_storage(WIFI_STORAGE_FLASH);
-    if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, (wifi_config_t *)config);
-    if (err == ESP_OK) err = save_transaction(config, false);
+    if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, &restored);
+    if (err == ESP_OK) err = save_transaction(&restored, false);
     return err;
 }
 
