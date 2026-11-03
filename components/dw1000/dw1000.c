@@ -60,6 +60,7 @@ enum {
 static const char *TAG = "dw1000";
 static uint16_t configured_antenna_delay;
 static spi_device_handle_t spi;
+static bool spi_bus_initialized;
 static bool correct_miso_shift;
 
 #ifdef CONFIG_UWB_CIR_ENABLE
@@ -151,7 +152,9 @@ static esp_err_t spi_bus_init(void)
         .quadhd_io_num = -1,
         .max_transfer_sz = 3 + UWB_SPI_MAX_DATA,
     };
-    return spi_bus_initialize(UWB_SPI_HOST, &bus, SPI_DMA_CH_AUTO);
+    esp_err_t err = spi_bus_initialize(UWB_SPI_HOST, &bus, SPI_DMA_CH_AUTO);
+    if (err == ESP_OK) spi_bus_initialized = true;
+    return err;
 }
 
 static esp_err_t spi_use_mode(uint8_t mode)
@@ -332,8 +335,8 @@ static esp_err_t configure_radio(const uint8_t eui[8], uint16_t pan_id,
     return dw1000_set_antenna_delay(configured_antenna_delay);
 }
 
-esp_err_t dw1000_init(const uint8_t eui[8], uint16_t pan_id, uint16_t short_address,
-                      uint16_t antenna_delay)
+static esp_err_t dw1000_init_impl(const uint8_t eui[8], uint16_t pan_id,
+                                  uint16_t short_address, uint16_t antenna_delay)
 {
     if (!eui) return ESP_ERR_INVALID_ARG;
     ESP_LOGI(TAG, "pins SCK=%d MISO=%d MOSI=%d CS=%d IRQ=%d RST=%d",
@@ -398,6 +401,43 @@ esp_err_t dw1000_init(const uint8_t eui[8], uint16_t pan_id, uint16_t short_addr
     ESP_LOGI(TAG, "DW1000 ready, device=0x%08" PRIx32 ", PAN=0x%04x, address=0x%04x",
              id, pan_id, short_address);
     return ESP_OK;
+}
+
+esp_err_t dw1000_deinit(void)
+{
+    esp_err_t err = ESP_OK;
+    if (spi) {
+        err = spi_bus_remove_device(spi);
+        if (err == ESP_OK) spi = NULL;
+    }
+    if (spi_bus_initialized && !spi) {
+        esp_err_t free_err = spi_bus_free(UWB_SPI_HOST);
+        if (err == ESP_OK) err = free_err;
+        if (free_err == ESP_OK) spi_bus_initialized = false;
+    }
+#ifdef CONFIG_UWB_CIR_ENABLE
+    portENTER_CRITICAL(&cir_lock);
+    cir_valid = false;
+    portEXIT_CRITICAL(&cir_lock);
+#endif
+    return err;
+}
+
+esp_err_t dw1000_init(const uint8_t eui[8], uint16_t pan_id,
+                      uint16_t short_address, uint16_t antenna_delay)
+{
+    if (spi || spi_bus_initialized) {
+        esp_err_t cleanup_err = dw1000_deinit();
+        if (cleanup_err != ESP_OK) return cleanup_err;
+    }
+    esp_err_t err = dw1000_init_impl(eui, pan_id, short_address, antenna_delay);
+    if (err != ESP_OK) {
+        esp_err_t cleanup_err = dw1000_deinit();
+        if (cleanup_err != ESP_OK)
+            ESP_LOGE(TAG, "SPI cleanup after initialization failure: %s",
+                     esp_err_to_name(cleanup_err));
+    }
+    return err;
 }
 
 uint32_t dw1000_device_id(void)

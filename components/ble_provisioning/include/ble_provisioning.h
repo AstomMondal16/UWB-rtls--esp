@@ -21,5 +21,6 @@ esp_err_t ble_provisioning_init(const char *service_name,
                                 ble_provisioning_event_cb_t event_cb,
                                 void *arg);
 esp_err_t ble_provisioning_request(void);
+esp_err_t ble_provisioning_request_stop(void);
 bool ble_provisioning_is_active(void);
 esp_err_t ble_provisioning_stop(void);

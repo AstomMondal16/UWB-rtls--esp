@@ -342,12 +342,14 @@ class LocalizationDashboard:
         self.button(actions, "CLEAR ALL DEVICES", self.clear_all, RED).pack(
             side="left", padx=4)
 
-        split = tk.PanedWindow(self.root, orient="horizontal", bg=BG,
-                               sashwidth=7, sashrelief="flat")
-        split.pack(fill="both", expand=True, padx=16, pady=(0, 14))
-        map_panel = tk.Frame(split, bg=PANEL, highlightbackground=BORDER,
+        workspace = tk.Frame(self.root, bg=PANEL, highlightbackground=BORDER,
                              highlightthickness=1)
-        side = tk.Frame(split, bg=BG, width=540)
+        workspace.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        split = tk.PanedWindow(workspace, orient="horizontal", bg=PANEL,
+                               sashwidth=5, sashrelief="flat", sashpad=2)
+        split.pack(fill="both", expand=True, padx=12, pady=12)
+        map_panel = tk.Frame(split, bg=PANEL)
+        side = tk.Frame(split, bg=PANEL, width=540)
         split.add(map_panel, stretch="always", minsize=580)
         split.add(side, stretch="never", minsize=470)
 
@@ -383,8 +385,7 @@ class LocalizationDashboard:
                  fg=TEXT, font=("Consolas", 9, "bold")).pack(
                      side="left", padx=8)
         self.imu_graph = tk.Canvas(map_panel, height=175, bg=PANEL,
-                                   highlightbackground=BORDER,
-                                   highlightthickness=1)
+                                   highlightthickness=0)
         self.imu_graph.pack(fill="x")
         self.imu_graph.bind("<Configure>", lambda _event: self.draw_imu_graph())
 
@@ -400,7 +401,7 @@ class LocalizationDashboard:
         self.configured.pack(fill="x")
         self.configured.bind("<<TreeviewSelect>>", self.select_configured)
         self.configured.bind("<Double-1>", lambda _event: self.edit_selected())
-        configured_actions = tk.Frame(side, bg=BG)
+        configured_actions = tk.Frame(side, bg=PANEL)
         configured_actions.pack(fill="x", pady=(6, 0))
         self.button(configured_actions, "+  ADD DEVICE", self.open_device_dialog,
                     GREEN).pack(side="left", fill="x", expand=True, padx=(0, 3))
@@ -437,7 +438,7 @@ class LocalizationDashboard:
 
     @staticmethod
     def section(parent, text):
-        tk.Label(parent, text=text, bg=BG, fg=MUTED,
+        tk.Label(parent, text=text, bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 4))
 
     @staticmethod

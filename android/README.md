@@ -11,7 +11,10 @@ telemetry, and channel impulse response (CIR) data.
 - View anchor and tag positions on a zoomable, pannable 2D map.
 - Select a device to view its accelerometer, gyroscope, and CIR graphs.
 - Start or pause data flow on configured devices.
-- Calibrate UWB antenna delay and collect telemetry to a CSV file.
+- Calibrate UWB antenna delay and record/export telemetry to CSV.
+- Provision a device's Wi-Fi over its encrypted BLE provisioning service,
+  with nearby network scanning and manual SSID entry.
+- Store Wi-Fi credentials and TLS certificate pins encrypted with Android Keystore.
 - Save configured devices on the phone between app launches.
 
 ## Requirements
@@ -71,8 +74,17 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 5. Select a device in **Device Selection** to view its IMU and CIR data.
 
 The app communicates with device HTTP endpoints such as `/api/telemetry`,
-`/api/cir`, and `/api/control`. It uses plain HTTP on the local network, so it
-does not require an internet connection after installation and build.
+`/api/cir`, and `/api/control` by default. To use a phone hotspot, leave the
+hotspot on, enter its exact network name and password in **Configure Wi-Fi via
+Bluetooth**, and provision each device. The phone and devices then share that
+local network; use **Scan network** to find the devices. HTTP and discovery
+need no internet connection. For HTTPS instead, enable it in menuconfig and
+enter the device's certificate fingerprint in its settings; see
+[`TLS_SETUP.md`](../components/telemetry/TLS_SETUP.md).
+Wi-Fi provisioning no longer asks for the 64-character API key. Its BLE
+Security 1 session encrypts traffic without a proof-of-possession check, so a
+nearby device can attempt provisioning while the device's service is open.
+The dashboard API has no client API key; use it only on a trusted local network.
 
 ## Using the app
 
@@ -85,8 +97,11 @@ does not require an internet connection after installation and build.
   new samples. The graph follows the strongest peak and centers its view on it.
 - **Start / Pause:** Starts or pauses data flow on configured devices that have
   an IP address.
-- **CSV:** Tap **CSV** to begin collecting telemetry; tap **Stop / CSV** to
-  finish collection and choose where to save the file.
+- **CSV:** Start recording from **Actions**. Recording appends to an app-private
+  session file with a 512 MiB limit and retains prior records across stops.
+  Choose **Export CSV** to save a streaming export. The export reports its row
+  count, capture time range, and missed telemetry sequence numbers; corrupted
+  session rows fail the export instead of being omitted.
 - **Calibrate:** Follow the in-app calibration prompt with a measured distance
   between the devices being calibrated.
 
@@ -99,6 +114,9 @@ details, see the repository's [main README](../README.md).
 
 - Confirm the phone and devices are on the same Wi-Fi network and the devices
   have booted and received an IP address.
+- When using the phone's hotspot, keep it enabled and make sure the device
+  joined that hotspot; the provisioning form takes the hotspot name/password
+  manually.
 - Allow local-network access if Android asks. On Android 17 / API 37, this
   permission is required for local UDP discovery and HTTP connections.
 - Turn off VPN temporarily and avoid guest Wi-Fi or networks with client
@@ -125,6 +143,11 @@ Check the firmware's IMU/CIR configuration, sensor wiring, and device boot
 output. CIR is captured by each receiver, so enable it on every device whose
 local CIR you want to inspect; the selected device also needs a successful UWB
 exchange with a peer.
+
+Wi-Fi credentials and TLS pins are encrypted at rest with Android
+Keystore AES/GCM. Android backup rules exclude their preference file and the
+local telemetry session file, so credentials must be entered again on a new
+phone.
 
 ## Project files
 

@@ -21,6 +21,7 @@
 build/
 .gradle/
 .gradle-home/
+.android/
 .android-user/
 *.o
 *.a

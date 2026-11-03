@@ -62,13 +62,10 @@ def api_json(address, device_id, method="GET", body=None, max_bytes=MAX_TELEMETR
         credentials = json.loads(os.environ["UWB_DEVICE_CREDENTIALS"])
         identity = normalize_mac(device_id) or str(device_id).strip().lower()
         secret = credentials[identity]
-        api_key = secret["api_key"]
         fingerprint = secret["tls_fingerprint"].replace(":", "").replace(" ", "")
         expected = bytes.fromhex(fingerprint)
     except (KeyError, ValueError, TypeError) as error:
         raise ValueError("Set UWB_DEVICE_CREDENTIALS JSON for each device MAC/IP") from error
-    if len(api_key) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in api_key):
-        raise ValueError("Device API key must contain 64 hexadecimal characters")
     if len(expected) != 32 or len(fingerprint) != 64:
         raise ValueError("Device TLS fingerprint must be 64 hexadecimal characters")
     parsed = urlsplit(address)
@@ -80,8 +77,7 @@ def api_json(address, device_id, method="GET", body=None, max_bytes=MAX_TELEMETR
     connection = HTTPSConnection(parsed.hostname, parsed.port or 443,
                                  timeout=1.0, context=context)
     try:
-        headers = {"Authorization": "Bearer " + api_key,
-                   "Cache-Control": "no-cache"}
+        headers = {"Cache-Control": "no-cache"}
         if body is not None:
             headers["Content-Type"] = "application/json"
         connection.request(method, parsed.path or "/", body=body, headers=headers)

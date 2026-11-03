@@ -17,6 +17,7 @@ typedef struct {
 } uwb_ranging_peer_t;
 
 typedef void (*uwb_ranging_callback_t)(const uwb_ranging_peer_t *peer);
+typedef void (*uwb_ranging_waiting_callback_t)(uwb_ranging_role_t role);
 
 typedef struct {
     uwb_ranging_role_t role;
@@ -28,6 +29,8 @@ typedef struct {
     uwb_ranging_callback_t on_range;
     uwb_ranging_callback_t on_new_device;
     uwb_ranging_callback_t on_inactive_device;
+    uint32_t waiting_log_interval_ms;
+    uwb_ranging_waiting_callback_t on_waiting;
 } uwb_ranging_config_t;
 
 /* Initializes the DW1000 and runs the selected role until a fatal error. */

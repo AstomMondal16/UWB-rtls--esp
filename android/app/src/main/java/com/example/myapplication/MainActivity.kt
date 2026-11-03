@@ -105,6 +105,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.security.KeyStore
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -125,6 +127,7 @@ private val Amber = Color(0xFFA55B00)
 private val Red = Color(0xFFC3344F)
 private val Page = Color(0xFFEAF0F3)
 private val Grid = Color(0xFFD5E0E5)
+private const val ESP_PROVISIONING_SERVICE_UUID = "1775244d-6b43-439b-877c-060f2d9bed07"
 
 private data class ImuReading(
     val sequence: Long,
@@ -139,9 +142,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var repository: DeviceRepository
     private val dashboard = mutableStateOf(DashboardSnapshot())
     private val createCsv = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri: Uri? ->
-        if (uri != null) runCatching {
-            contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(repository.csv()) }
-        }.onFailure { repository.setStatus("Could not save CSV: ${it.message}") }
+        if (uri == null) {
+            repository.setStatus("CSV export cancelled")
+        } else {
+            val output = runCatching { contentResolver.openOutputStream(uri) }
+                .onFailure { repository.setStatus("Could not create CSV file: ${it.message}") }
+                .getOrNull()
+            if (output == null) repository.setStatus("Could not open the selected CSV file")
+            else repository.exportCsv(output) { }
+        }
     }
     private val localNetworkPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) repository.manualScan()
@@ -163,7 +172,11 @@ class MainActivity : ComponentActivity() {
                 }
                 Crossfade(targetState = showSplash, animationSpec = tween(350), label = "startup") { splash ->
                     if (splash) SenseSplash() else DashboardApp(snapshot, repository,
-                        onSaveCsv = { createCsv.launch("uwb_localization_${System.currentTimeMillis()}.csv") },
+                        onSaveCsv = {
+                            val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", Locale.US))
+                            val label = it.replace(Regex("[^A-Za-z0-9_-]"), "_").trim('_').ifBlank { "session" }
+                            createCsv.launch("UWB_${label}_$stamp.csv")
+                        },
                         onScan = { if (requestLocalNetworkIfNeeded()) repository.manualScan() })
                 }
             }
@@ -217,15 +230,26 @@ private fun SenseSplash() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, onSaveCsv: () -> Unit, onScan: () -> Unit) {
+private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, onSaveCsv: (String) -> Unit, onScan: () -> Unit) {
     var editing by remember { mutableStateOf<DeviceRecord?>(null) }
     var editorOpen by remember { mutableStateOf(false) }
     var configOpen by remember { mutableStateOf(false) }
     var wifiProvisionOpen by remember { mutableStateOf(false) }
+    var actionsExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val blePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         if (result.values.all { it }) wifiProvisionOpen = true
         else repo.setStatus("Bluetooth permission is required to provision Wi-Fi")
+    }
+    fun requestWifiProvisioning() {
+        val required = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        val missing = required.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) wifiProvisionOpen = true
+        else blePermissionLauncher.launch(missing.toTypedArray())
     }
     var clearConfirm by remember { mutableStateOf(false) }
     var cirData by remember { mutableStateOf<JSONObject?>(null) }
@@ -277,7 +301,7 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
         if (cirDeviceKey != chosen?.key || !current.optBoolean("valid")) return@LaunchedEffect
         val key = listOf("sequence", "timestamp_ms", "rx_timestamp", "peer_address",
             "start_index", "first_path_index", "sample_count")
-            .joinToString(":") { current.opt(it).toString() }
+            .joinToString(":") { current.opt(it)?.toString().orEmpty() }
         if (key != lastCirHistoryKey) {
             val iq = current.optJSONArray("iq") ?: return@LaunchedEffect
             val magnitudes = (0 until iq.length()).mapNotNull { index ->
@@ -329,118 +353,160 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
                 Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(22.dp)) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Image(painterResource(R.drawable.sense_logo), contentDescription = "SE UWB",
-                                contentScale = ContentScale.Fit, modifier = Modifier.width(76.dp).height(31.dp))
-                            Spacer(Modifier.width(8.dp))
                             Column(Modifier.weight(1f)) {
-                                Text("UWB LOCALIZATION", color = Ink, fontWeight = FontWeight.ExtraBold,
+                                Text("DASHBOARD", color = Ink, fontWeight = FontWeight.ExtraBold,
                                     fontSize = 15.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                                Text("${snapshot.states.values.count { it.online }} online · ${snapshot.positions.size} tags",
+                                Text("${snapshot.states.values.count { it.online }} online \u00b7 ${snapshot.positions.size} tags",
                                     color = Muted, fontSize = 11.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                             }
-                        }
-                        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            HeaderAction("⚙", "Devices", Modifier.weight(1f), onClick = { configOpen = true })
-                            HeaderAction(if (snapshot.calibrationProgress.isBlank()) "⚑" else "×", "Calibrate", Modifier.weight(1f), onClick = {
-                                repo.startOrCancelCalibration()?.let(repo::setStatus)
-                            })
-                            HeaderAction(if (snapshot.collecting) "■" else "⇩", if (snapshot.collecting) "Stop / CSV" else "CSV",
-                                Modifier.weight(1f), onClick = {
-                                    if (snapshot.collecting) { repo.setCollecting(false); onSaveCsv() }
-                                    else repo.setCollecting(true)
-                                })
-                            HeaderAction(if (tracking) "Ⅱ" else "▶", if (tracking) "Pause" else "Start", Modifier.weight(1f), onClick = { repo.setStreaming(!tracking) })
+                            TextButton(enabled = snapshot.collected > 0, onClick = {
+                                onSaveCsv(chosen?.let { names[it.key] }.orEmpty().ifBlank { "session" })
+                            }) { Text("Export CSV", fontSize = 11.sp, maxLines = 1) }
+                            Box {
+                                Surface(color = Color(0xFFE7F4F8), shape = CircleShape,
+                                    modifier = Modifier.size(42.dp).clickable { actionsExpanded = true }
+                                        .semantics { contentDescription = "Open dashboard actions" }) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text("\u22ee", color = Cyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                                DropdownMenu(expanded = actionsExpanded,
+                                    onDismissRequest = { actionsExpanded = false }) {
+                                    DropdownMenuItem(text = { Text("Devices") }, onClick = {
+                                        actionsExpanded = false
+                                        configOpen = true
+                                    })
+                                    DropdownMenuItem(text = {
+                                        Text(if (snapshot.calibrationProgress.isBlank()) "Calibrate" else "Cancel calibration")
+                                    }, onClick = {
+                                        actionsExpanded = false
+                                        repo.startOrCancelCalibration()?.let(repo::setStatus)
+                                    })
+                                    DropdownMenuItem(text = {
+                                        Text(if (snapshot.collecting) "Stop CSV recording" else "Start CSV recording")
+                                    }, onClick = {
+                                        actionsExpanded = false
+                                        repo.setCollecting(!snapshot.collecting)
+                                    })
+                                    DropdownMenuItem(enabled = snapshot.collected > 0,
+                                        text = { Text("Export CSV (${snapshot.collected} records)") }, onClick = {
+                                            actionsExpanded = false
+                                            if (snapshot.collecting) repo.setCollecting(false)
+                                            onSaveCsv(chosen?.let { names[it.key] }.orEmpty().ifBlank { "session" })
+                                    })
+                                    DropdownMenuItem(text = {
+                                        Text(if (tracking) "Pause tracking" else "Start tracking")
+                                    }, onClick = {
+                                        actionsExpanded = false
+                                        repo.setStreaming(!tracking)
+                                    })
+                                    DropdownMenuItem(text = { Text("Configure Wi-Fi via Bluetooth") }, onClick = {
+                                        actionsExpanded = false
+                                        requestWifiProvisioning()
+                                    })
+                                }
+                            }
                         }
                     }
                 }
-                Text(snapshot.status, color = Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 12.dp, top = 5.dp))
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 12.dp, top = 5.dp)) {
+                    if (snapshot.status.startsWith("Exporting")) {
+                        CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Cyan)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(snapshot.status, color = Muted, fontSize = 12.sp, maxLines = 2,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                }
                 if (snapshot.calibrationProgress.isNotBlank()) Text(snapshot.calibrationProgress, color = Amber, fontSize = 11.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 12.dp))
             }
             item {
-                SectionCard("2D LOCALIZATION MAP", headerAction = {
-                    TextButton(onClick = { fitMapRequest++ },
-                        modifier = Modifier.size(30.dp).semantics { contentDescription = "Fit all anchors and tags" },
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
-                        Text("⌂", color = Cyan, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                DashboardGroup {
+                    GroupedSection("DEVICE SELECTION") {
+                        DevicePickerContent(snapshot.devices, chosen, names, snapshot.states,
+                            onSelect = { selectedKey = it })
                     }
-                }) {
-                    if (snapshot.devices.none { it.role == "anchor" }) {
-                        EmptyHint("Add three or more anchors in ⚙ Configuration to start mapping.")
-                    } else {
-                        LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, fitMapRequest,
-                            Modifier.fillMaxWidth().height(270.dp).clip(RoundedCornerShape(12.dp)))
-                        MapLegend()
-                    }
-                    snapshot.positions.entries.firstOrNull()?.let { (tag, p) ->
-                        Text("${names[tag] ?: "Tag"}   X ${String.format(Locale.US, "%+.2f", p.x)} m   Y ${String.format(Locale.US, "%+.2f", p.y)} m   RMS ${p.error.fmt()} m",
-                            color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
-                    }
-                }
-            }
-            item {
-                DevicePicker(snapshot.devices, chosen, names, snapshot.states, onSelect = { selectedKey = it })
-            }
-            item {
-                SectionCard("BATTERY STATUS") {
-                    when {
-                        chosen == null -> EmptyHint("Add or select a device to view battery telemetry.")
-                        sample == null -> EmptyHint("Waiting for battery telemetry from ${names[chosen.key]}.")
-                        snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline.")
-                        !sample.optBoolean("battery_valid") -> EmptyHint("Battery reading is unavailable. Check the firmware battery monitor and ADC wiring.")
-                        else -> MetricRow("VOLTAGE", String.format(Locale.US, "%.2f V", sample.optDouble("battery_voltage")),
-                            "CHARGE", String.format(Locale.US, "%.0f%%", sample.optDouble("battery_percent")))
-                    }
-                }
-            }
-            item {
-                SectionCard("IMU DATA · ${chosen?.let { names[it.key] } ?: "NO DEVICE"}") {
-                    when {
-                        chosen == null -> EmptyHint("Add or select a device to view IMU telemetry.")
-                        sample == null -> EmptyHint("Waiting for telemetry from ${names[chosen.key]}. Check that it is online.")
-                        snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline. Reconnect it to Wi-Fi to receive IMU telemetry.")
-                        !sample.optBoolean("imu_valid") -> EmptyHint(
-                            if (!sample.optBoolean("imu_enabled", true))
-                                "IMU is disabled in this device's firmware. Enable the MPU6050 and flash the device."
-                            else "Waiting for a valid MPU6050 sample. Check sensor wiring and the device boot log.")
-                        else -> {
-                            MetricRow("ACCEL · g", vector(sample, "accel"), "GYRO · °/s", vector(sample, "gyro"))
-                            ImuChart("ACCELEROMETER · g", imuHistory, acceleration = true,
-                                modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
-                            ImuChart("GYROSCOPE · °/s", imuHistory, acceleration = false,
-                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                        }
-                    }
-                }
-            }
-            item {
-                SectionCard("CIR DATA MAP") {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(chosen?.let { "${names[it.key] ?: "Device"} ? ${it.mac.ifBlank { it.ip }}" } ?: "Select a device",
-                            color = Muted, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                        TextButton(onClick = {
-                            if (chosen == null || chosenIp.isBlank()) cirError = "This device has no IP address"
-                            else {
-                                cirError = "Loading CIR..."
-                                cirDeviceKey = chosen.key
-                                requestCir(chosen.key, chosenIp)
-                            }
-                        }) { Text("Refresh") }
-                    }
-                    val activeCir = cirData.takeIf { cirDeviceKey == chosen?.key }
-                    if (activeCir?.optBoolean("valid") == true) {
-                        CirPlot(activeCir, cirHistory, Modifier.fillMaxWidth().height(260.dp))
-                        Text("${activeCir.optInt("sample_count")} samples ? seq ${activeCir.optLong("sequence")} ? age ${activeCir.optLong("age_ms")} ms",
-                            color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
-                    } else EmptyHint(cirError.ifBlank {
+                    GroupDivider()
+                    GroupedSection("BATTERY STATUS") {
                         when {
-                            activeCir?.optBoolean("enabled") == false -> "CIR is disabled in this device's firmware."
-                            activeCir != null -> "CIR is enabled; waiting for a UWB packet from another device."
-                            else -> "Waiting for automatic CIR updates from the selected device."
+                            chosen == null -> EmptyHint("Add or select a device to view battery telemetry.")
+                            sample == null -> EmptyHint("Waiting for battery telemetry from ${names[chosen.key]}.")
+                            snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline.")
+                            !sample.optBoolean("battery_valid") -> EmptyHint("Battery reading is unavailable. Check the firmware battery monitor and ADC wiring.")
+                            else -> MetricRow("VOLTAGE", String.format(Locale.US, "%.2f V", sample.optDouble("battery_voltage")),
+                                "CHARGE", String.format(Locale.US, "%.0f%%", sample.optDouble("battery_percent")))
                         }
-                    })
+                    }
+                }
+            }
+            item {
+                DashboardGroup {
+                    GroupedSection("2D LOCALIZATION MAP", headerAction = {
+                        TextButton(onClick = { fitMapRequest++ },
+                            modifier = Modifier.size(30.dp).semantics { contentDescription = "Fit all anchors and tags" },
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
+                            Text("FIT", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }) {
+                        if (snapshot.devices.none { it.role == "anchor" }) {
+                            EmptyHint("Add three or more anchors in Configuration to start mapping.")
+                        } else {
+                            LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, fitMapRequest,
+                                Modifier.fillMaxWidth().height(270.dp).clip(RoundedCornerShape(12.dp)))
+                            MapLegend()
+                        }
+                        snapshot.positions.entries.firstOrNull()?.let { (tag, p) ->
+                            Text("${names[tag] ?: "Tag"}   X ${String.format(Locale.US, "%+.2f", p.x)} m   Y ${String.format(Locale.US, "%+.2f", p.y)} m   RMS ${p.error.fmt()} m",
+                                color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                        }
+                    }
+                    GroupDivider()
+                    GroupedSection("IMU DATA - ${chosen?.let { names[it.key] } ?: "NO DEVICE"}") {
+                        when {
+                            chosen == null -> EmptyHint("Add or select a device to view IMU telemetry.")
+                            sample == null -> EmptyHint("Waiting for telemetry from ${names[chosen.key]}. Check that it is online.")
+                            snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline. Reconnect it to Wi-Fi to receive IMU telemetry.")
+                            !sample.optBoolean("imu_valid") -> EmptyHint(
+                                if (!sample.optBoolean("imu_enabled", true))
+                                    "IMU is disabled in this device's firmware. Enable the MPU6050 and flash the device."
+                                else "Waiting for a valid MPU6050 sample. Check sensor wiring and the device boot log.")
+                            else -> {
+                                MetricRow("ACCEL - g", vector(sample, "accel"), "GYRO - deg/s", vector(sample, "gyro"))
+                                ImuChart("ACCELEROMETER - g", imuHistory, acceleration = true,
+                                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                                ImuChart("GYROSCOPE - deg/s", imuHistory, acceleration = false,
+                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                            }
+                        }
+                    }
+                    GroupDivider()
+                    GroupedSection("CIR DATA MAP") {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(chosen?.let { "${names[it.key] ?: "Device"} | ${it.mac.ifBlank { it.ip }}" } ?: "Select a device",
+                                color = Muted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                            TextButton(onClick = {
+                                if (chosen == null || chosenIp.isBlank()) cirError = "This device has no IP address"
+                                else {
+                                    cirError = "Loading CIR..."
+                                    cirDeviceKey = chosen.key
+                                    requestCir(chosen.key, chosenIp)
+                                }
+                            }) { Text("Refresh") }
+                        }
+                        val activeCir = cirData.takeIf { cirDeviceKey == chosen?.key }
+                        if (activeCir?.optBoolean("valid") == true) {
+                            CirPlot(activeCir, cirHistory, Modifier.fillMaxWidth().height(260.dp))
+                            Text("${activeCir.optInt("sample_count")} samples | seq ${activeCir.optLong("sequence")} | age ${activeCir.optLong("age_ms")} ms",
+                                color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
+                        } else EmptyHint(cirError.ifBlank {
+                            when {
+                                activeCir?.optBoolean("enabled") == false -> "CIR is disabled in this device's firmware."
+                                activeCir != null -> "CIR is enabled; waiting for a UWB packet from another device."
+                                else -> "Waiting for automatic CIR updates from the selected device."
+                            }
+                        })
+                    }
                 }
             }
             item { Text("${snapshot.devices.size} configured devices · ${snapshot.discovered.size} discovered", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(bottom = 16.dp)) }
@@ -451,23 +517,17 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
         onAdd = { editing = null; configOpen = false; editorOpen = true },
         onEdit = { editing = it; configOpen = false; editorOpen = true },
         onClear = { clearConfirm = true },
-        onWifiProvision = {
-            val required = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-                arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-            else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-            val missing = required.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
-            if (missing.isEmpty()) wifiProvisionOpen = true else blePermissionLauncher.launch(missing.toTypedArray())
-        },
+        onWifiProvision = ::requestWifiProvisioning,
         onDismiss = { configOpen = false })
     if (wifiProvisionOpen) WifiProvisioningDialog(onDismiss = { wifiProvisionOpen = false })
     if (editorOpen) DeviceEditorDialog(editing,
         initialSecurity = LastWifiCredentialStore.loadDeviceSecurity(context,
             editing?.let { it.mac.ifBlank { it.ip } }.orEmpty()),
-        onDismiss = { editorOpen = false; configOpen = true }, onSave = { record, apiKey, fingerprint ->
+        onDismiss = { editorOpen = false; configOpen = true }, onSave = { record, fingerprint ->
         val error = repo.upsert(record, editing?.key)
         if (error == null) {
-            if (!LastWifiCredentialStore.saveDeviceSecurity(context, record.mac.ifBlank { record.ip }, apiKey, fingerprint)) {
-                repo.setStatus("Could not securely save device credentials")
+            if (!LastWifiCredentialStore.saveDeviceSecurity(context, record.mac.ifBlank { record.ip }, fingerprint)) {
+                repo.setStatus("Could not save device connection settings")
             } else {
                 if (record.ip.isNotBlank()) repo.postControl(record.ip, JSONObject().put("role", record.role), record.mac)
                 editorOpen = false; configOpen = true
@@ -481,45 +541,59 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
 }
 
 @Composable
-private fun HeaderAction(icon: String, label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Surface(color = Color(0xFFF3F8FA), shape = RoundedCornerShape(14.dp),
-        modifier = modifier.height(56.dp).clickable(onClick = onClick)
-            .semantics { contentDescription = label }) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Text(icon, color = Cyan, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text(label, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
-                maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+private fun DevicePickerContent(devices: List<DeviceRecord>, chosen: DeviceRecord?, names: Map<String, String>,
+                                states: Map<String, DeviceState>, onSelect: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(9.dp).clip(CircleShape).background(if (chosen?.let { states[it.key]?.online } == true) Green else Muted))
+                Spacer(Modifier.width(8.dp))
+                Text(chosen?.let { "${names[it.key] ?: "Device"} | ${it.mac.ifBlank { it.ip }}" } ?: "Choose a device",
+                    color = Ink, modifier = Modifier.weight(1f))
+                Text("v", color = Cyan, fontSize = 18.sp)
+            }
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.fillMaxWidth(.88f)) {
+            devices.forEach { device ->
+                DropdownMenuItem(text = {
+                    Column {
+                        Text("${names[device.key] ?: "Device"} | ${device.role.uppercase()}", color = Ink)
+                        Text(device.mac.ifBlank { device.ip }, color = Muted, fontSize = 11.sp)
+                    }
+                }, onClick = { onSelect(device.key); expanded = false })
+            }
         }
     }
 }
 
 @Composable
-private fun DevicePicker(devices: List<DeviceRecord>, chosen: DeviceRecord?, names: Map<String, String>,
-                         states: Map<String, DeviceState>, onSelect: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    SectionCard("DEVICE SELECTION") {
-        Box {
-            OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(9.dp).clip(CircleShape).background(if (chosen?.let { states[it.key]?.online } == true) Green else Muted))
-                    Spacer(Modifier.width(8.dp))
-                    Text(chosen?.let { "${names[it.key] ?: "Device"} · ${it.mac.ifBlank { it.ip }}" } ?: "Choose a device",
-                        color = Ink, modifier = Modifier.weight(1f))
-                    Text("⌄", color = Cyan, fontSize = 18.sp)
-                }
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.fillMaxWidth(.88f)) {
-                devices.forEach { device ->
-                    DropdownMenuItem(text = {
-                        Column {
-                            Text("${names[device.key] ?: "Device"} · ${device.role.uppercase()}", color = Ink)
-                            Text(device.mac.ifBlank { device.ip }, color = Muted, fontSize = 11.sp)
-                        }
-                    }, onClick = { onSelect(device.key); expanded = false })
-                }
-            }
-        }
+private fun DashboardGroup(content: @Composable ColumnScope.() -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White),
+        shape = RoundedCornerShape(18.dp), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), content = content)
     }
+}
+
+@Composable
+private fun GroupedSection(title: String, headerAction: (@Composable () -> Unit)? = null,
+                           content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold,
+                letterSpacing = .7.sp, modifier = Modifier.weight(1f))
+            headerAction?.invoke()
+        }
+        Spacer(Modifier.height(8.dp))
+        content()
+    }
+}
+
+@Composable
+private fun GroupDivider() {
+    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.fillMaxWidth().height(1.dp).background(Page))
+    Spacer(Modifier.height(12.dp))
 }
 
 @Composable
@@ -542,7 +616,7 @@ private fun ConfigurationDialog(snapshot: DashboardSnapshot, names: Map<String, 
                     OutlinedButton(onClick = onScan, modifier = Modifier.weight(1f)) { Text("Scan network", maxLines = 1) }
                     Button(onClick = onAdd, modifier = Modifier.weight(1f)) { Text("+  Add device", maxLines = 1) }
                 }
-                OutlinedButton(onClick = onWifiProvision, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) { Text("Set up device Wi-Fi with Bluetooth") }
+                OutlinedButton(onClick = onWifiProvision, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) { Text("Configure Wi-Fi via Bluetooth") }
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                     Box(Modifier.size(7.dp).clip(CircleShape).background(Cyan))
                     Text(repo.snapshot().status, color = Muted, fontSize = 10.sp, maxLines = 1,
@@ -601,8 +675,8 @@ private fun ConfigurationDialog(snapshot: DashboardSnapshot, names: Map<String, 
 }
 
 
-private data class SavedWifiCredentials(val ssid: String = "", val password: String = "")
-internal data class DeviceSecurity(val apiKey: String = "", val tlsFingerprint: String = "")
+internal data class SavedWifiCredentials(val ssid: String = "", val password: String = "")
+internal data class DeviceSecurity(val tlsFingerprint: String = "")
 
 internal object LastWifiCredentialStore {
     private const val PREFS = "wifi_provisioning"
@@ -652,7 +726,7 @@ internal object LastWifiCredentialStore {
             cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(),
                 GCMParameterSpec(128, packed.copyOfRange(0, IV_LENGTH)))
             val json = JSONObject(String(cipher.doFinal(packed.copyOfRange(IV_LENGTH, packed.size)), Charsets.UTF_8))
-            DeviceSecurity(json.optString("api_key"), json.optString("tls_fingerprint"))
+            DeviceSecurity(json.optString("tls_fingerprint"))
         } catch (_: Exception) {
             context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
                 .remove("device_${deviceIdentity(mac)}").apply()
@@ -661,16 +735,16 @@ internal object LastWifiCredentialStore {
     }
 
     fun saveDeviceSecurity(context: android.content.Context, mac: String,
-                           apiKey: String, tlsFingerprint: String): Boolean = try {
+                           tlsFingerprint: String): Boolean = try {
         val key = "device_${deviceIdentity(mac)}"
-        if (apiKey.isBlank() && tlsFingerprint.isBlank()) {
+        if (tlsFingerprint.isBlank()) {
             context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
                 .remove(key).apply()
         } else {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-            val plaintext = JSONObject().put("api_key", apiKey.trim())
-                .put("tls_fingerprint", tlsFingerprint.trim()).toString().toByteArray(Charsets.UTF_8)
+            val plaintext = JSONObject().put("tls_fingerprint", tlsFingerprint.trim())
+                .toString().toByteArray(Charsets.UTF_8)
             val packed = cipher.iv + cipher.doFinal(plaintext)
             context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
                 .putString(key, Base64.encodeToString(packed, Base64.NO_WRAP)).apply()
@@ -725,7 +799,6 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     val savedCredentials = remember { LastWifiCredentialStore.load(context) }
     var ssid by remember { mutableStateOf(savedCredentials.ssid) }
     var password by remember { mutableStateOf(savedCredentials.password) }
-    var deviceSecret by remember { mutableStateOf("") }
     LaunchedEffect(ssid, password) {
         delay(300)
         LastWifiCredentialStore.save(context, ssid, password)
@@ -734,14 +807,15 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
         LastWifiCredentialStore.save(context, ssid, password)
         onDismiss()
     }
-    var status by remember { mutableStateOf("Searching for devices named PROV_…") }
+    var status by remember { mutableStateOf("Searching for nearby provisioning devices…") }
     var scanning by remember { mutableStateOf(true) }
     var sending by remember { mutableStateOf(false) }
     var bleConnected by remember { mutableStateOf(false) }
     var activeDevice by remember { mutableStateOf<ESPDevice?>(null) }
+    var showPassword by remember { mutableStateOf(false) }
     val observer = remember {
         ProvisionConnectionObserver(
-            onConnected = { bleConnected = true; status = "Device connected. Enter the Wi-Fi network details." },
+            onConnected = { bleConnected = true; status = "Connected. Enter the phone hotspot name and password." },
             onFailed = { bleConnected = false; status = it }
         )
     }
@@ -755,15 +829,18 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     val scan = {
         devices = emptyList()
         scanning = true
-        status = "Searching for nearby UWB devices…"
-        manager.searchBleEspDevices("PROV_", object : BleScanListener {
+        status = "Searching for nearby provisioning devices…"
+        manager.searchBleEspDevices(object : BleScanListener {
             override fun scanStartFailed() {
                 scanning = false
                 status = "Bluetooth is off or scanning could not start"
             }
             override fun onPeripheralFound(device: BluetoothDevice, scanResult: ScanResult) {
-                val uuid = scanResult.scanRecord?.serviceUuids?.firstOrNull()?.uuid?.toString()
-                    ?: "0000ffff-0000-1000-8000-00805f9b34fb"
+                val services = scanResult.scanRecord?.serviceUuids.orEmpty()
+                val provisioningService = services.firstOrNull {
+                    it.uuid.toString().equals(ESP_PROVISIONING_SERVICE_UUID, ignoreCase = true)
+                } ?: return
+                val uuid = provisioningService.uuid.toString()
                 val found = BleProvisionTarget(device, uuid)
                 if (devices.none { it.device.address == device.address }) devices = devices + found
             }
@@ -788,13 +865,8 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                         modifier = Modifier.weight(1f))
                     TextButton(onClick = ::dismissDialog) { Text("Close") }
                 }
-                Text("Connect to the device over Bluetooth, then send its Wi-Fi credentials.",
-                    color = Muted, fontSize = 12.sp)
-                OutlinedTextField(value = deviceSecret, onValueChange = { deviceSecret = it },
-                    label = { Text("64-character device setup key") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth())
+                Text("Enter this phone's hotspot name and password. Keep its hotspot enabled so the device can join the same local network.",
+                    color = Amber, fontSize = 12.sp)
                 OutlinedButton(onClick = scan, enabled = !scanning, modifier = Modifier.fillMaxWidth()) {
                     Text(if (scanning) "Scanning…" else "Scan for UWB devices")
                 }
@@ -806,7 +878,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                                 status = "Connecting to " + (target.device.name ?: "UWB device") + "…"
                                 val esp = manager.createESPDevice(ESPConstants.TransportType.TRANSPORT_BLE,
                                     ESPConstants.SecurityType.SECURITY_1)
-                                esp.setProofOfPossession(deviceSecret.trim())
+                                esp.setProofOfPossession("")
                                 esp.setBluetoothDevice(target.device)
                                 esp.setPrimaryServiceUuid(target.serviceUuid)
                                 activeDevice = esp
@@ -822,19 +894,31 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                     singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Wi-Fi password") },
                     singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    visualTransformation = if (showPassword) androidx.compose.ui.text.input.VisualTransformation.None
+                        else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    trailingIcon = {
+                        TextButton(onClick = { showPassword = !showPassword }) {
+                            Text(if (showPassword) "Hide" else "Show")
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth())
                 Text(status, color = if (status.contains("failed", true) || status.contains("could not", true)) Red else Muted,
                     fontSize = 12.sp)
                 Button(onClick = {
                     LastWifiCredentialStore.save(context, ssid, password)
                     val esp = activeDevice
-                    if (deviceSecret.trim().length != 64 || deviceSecret.trim().any { it.digitToIntOrNull(16) == null }) {
-                        status = "Enter the 64-character device key from the developer"
-                        return@Button
-                    }
                     if (esp == null || !bleConnected || ssid.isBlank()) {
                         status = if (esp == null || !bleConnected) "Select and connect to a device first" else "Enter the Wi-Fi network name"
+                        return@Button
+                    }
+                    if (ssid.trim().toByteArray(Charsets.UTF_8).size !in 1..32) {
+                        status = "Wi-Fi network name must be 1 to 32 bytes"
+                        return@Button
+                    }
+                    val passwordBytes = password.toByteArray(Charsets.UTF_8)
+                    if (passwordBytes.isNotEmpty() && passwordBytes.size !in 8..63 &&
+                        !(passwordBytes.size == 64 && password.all { it.digitToIntOrNull(16) != null })) {
+                        status = "Use an open network, an 8-63 character password, or a 64-digit hexadecimal key"
                         return@Button
                     }
                     sending = true
@@ -1197,7 +1281,7 @@ private fun SectionCard(title: String, headerAction: (@Composable () -> Unit)? =
 @Composable
 private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
                                initialSecurity: DeviceSecurity,
-                               onSave: (DeviceRecord, String, String) -> Unit) {
+                               onSave: (DeviceRecord, String) -> Unit) {
     var mac by remember(device) { mutableStateOf(device?.mac.orEmpty()) }
     var ip by remember(device) { mutableStateOf(device?.ip.orEmpty()) }
     var role by remember(device) { mutableStateOf(device?.role ?: "anchor") }
@@ -1205,7 +1289,6 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
     var y by remember(device) { mutableStateOf(device?.y?.toString() ?: "0") }
     var z by remember(device) { mutableStateOf(device?.z?.toString() ?: "0") }
     var yaw by remember(device) { mutableStateOf(device?.yawOffset?.toString() ?: "0") }
-    var apiKey by remember(device) { mutableStateOf(initialSecurity.apiKey) }
     var tlsFingerprint by remember(device) { mutableStateOf(initialSecurity.tlsFingerprint) }
     var error by remember { mutableStateOf("") }
     fun record(): DeviceRecord? {
@@ -1231,25 +1314,18 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
                     NumericField("Z (m)", z, { z = it }, Modifier.weight(1f))
                     NumericField("Yaw offset°", yaw, { yaw = it }, Modifier.weight(1f))
                 }
-                OutlinedTextField(apiKey, { apiKey = it }, label = { Text("64-character device API key") },
-                    singleLine = true, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(tlsFingerprint, { tlsFingerprint = it },
-                    label = { Text("TLS certificate SHA-256 fingerprint") }, singleLine = true,
+                    label = { Text("TLS certificate fingerprint (optional; blank uses local HTTP)") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth())
                 if (error.isNotBlank()) Text(error, color = Red, fontSize = 12.sp)
             }
         },
         confirmButton = { TextButton(onClick = {
-            val key = apiKey.trim()
             val fingerprint = tlsFingerprint.filterNot { it == ':' || it.isWhitespace() }
-            if (key.length != 64 || key.any { it.digitToIntOrNull(16) == null }) {
-                error = "Enter the 64-character API key configured for this device"; return@TextButton
+            if (fingerprint.isNotBlank() && (fingerprint.length != 64 || fingerprint.any { it.digitToIntOrNull(16) == null })) {
+                error = "Fingerprint must be blank or 64 hexadecimal characters"; return@TextButton
             }
-            if (fingerprint.length != 64 || fingerprint.any { it.digitToIntOrNull(16) == null }) {
-                error = "Enter the device certificate SHA-256 fingerprint"; return@TextButton
-            }
-            record()?.let { onSave(it, key, fingerprint.uppercase(Locale.ROOT)) }
+            record()?.let { onSave(it, fingerprint.uppercase(Locale.ROOT)) }
         }) { Text("Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }

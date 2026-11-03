@@ -19,29 +19,21 @@ config UWB_WIFI_PASSWORD
     string "Wi-Fi password"
     default ""
 
-config UWB_BLE_DEVICE_ID
-    string "BLE provisioning device ID suffix (optional)"
-    default ""
+config UWB_BLE_SERVICE_NAME
+    string "BLE provisioning device name"
+    default "UWB_E0D3C4"
     help
-        Override the suffix after PROV_ in the BLE provisioning name.
-        Leave blank to use the last three bytes of the device MAC address.
-
-config UWB_DEVICE_SECRET
-    string "Per-device BLE proof of possession and API key (64 hex characters)"
-    default ""
-    help
-        Set a unique random 64-character hexadecimal secret for this device.
-        Enter the same value in the Android app. It protects BLE provisioning
-        and HTTP API access. Do not reuse a fleet-wide value.
+        Exact BLE name advertised while Wi-Fi provisioning is active. Enter
+        any name up to 32 characters, for example UWB_01. Use a unique name.
 
 config UWB_TLS_ENABLE
-    bool "Require HTTPS for the dashboard API"
+    bool "Use HTTPS for the dashboard API"
     default n
     help
         Use the unique self-signed device certificate and private key in
         components/telemetry/certs/device_cert.pem and device_key.pem. Clients
-        must pin the certificate SHA-256 fingerprint. Without this option the
-        telemetry API is not started; the firmware never falls back to HTTP.
+        must pin the certificate SHA-256 fingerprint. When disabled, the API
+        uses plain HTTP for trusted local networks such as a phone hotspot.
 
 menu "DW1000 GPIO pins"
 
@@ -90,15 +82,6 @@ config UWB_PAN_ID
     hex "UWB PAN ID"
     range 0x0000 0xffff
     default 0xdeca
-
-config UWB_RANGING_AUTH_KEY
-    string "Shared UWB ranging key (64 hex characters)"
-    default ""
-    help
-        Set the same unique random 64-character hexadecimal key on every tag
-        and anchor in this deployment. Frames are authenticated with HMAC-SHA256
-        and replayed sequence numbers are rejected. All peers must run this
-        protocol version; legacy Arduino peers will not interoperate.
 
 config UWB_CIR_ENABLE
     bool "Enable DW1000 channel impulse response (CIR) capture"

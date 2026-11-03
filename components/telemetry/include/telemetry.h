@@ -45,3 +45,6 @@ bool telemetry_publish(const telemetry_sample_t *sample);
 /* Update independent IMU telemetry; it does not require a UWB range sample. */
 void telemetry_update_imu(bool valid, const float accel[3],
                           const float gyro[3], float temperature_c);
+
+/* Battery readings are independent of UWB range samples. */
+void telemetry_update_battery(float voltage, float percent);

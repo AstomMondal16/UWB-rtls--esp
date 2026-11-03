@@ -9,14 +9,14 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "psa/crypto.h"
+#include "sensor_coordinator.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #define FRAME_LEN       98
-#define AUTH_SEQ_OFFSET 86
-#define AUTH_TAG_OFFSET 90
-#define AUTH_TAG_LEN    8
+#define SEQUENCE_OFFSET 86
+#define RESERVED_OFFSET 90
+#define RESERVED_LEN    8
 #define SHORT_MAC_LEN   9
 #define LONG_MAC_LEN    15
 #define ID_EXTENSION    80
@@ -27,9 +27,6 @@
 #define DISCOVERY_SLOT_US 12000
 #define DISCOVERY_WINDOW_MS 120
 #define DISCOVERY_INTERVAL_MS 3000
-#ifndef CONFIG_UWB_RANGING_AUTH_KEY
-#define CONFIG_UWB_RANGING_AUTH_KEY ""
-#endif
 
 enum {
     MSG_POLL = 0,
@@ -45,8 +42,8 @@ typedef struct {
     uint8_t short_address[2];
     uwb_ranging_peer_t peer;
     int64_t last_activity_ms;
-    uint32_t last_auth_sequence;
-    bool has_auth_sequence;
+    uint32_t last_sequence;
+    bool has_sequence;
 } tag_anchor_t;
 
 typedef struct {
@@ -57,8 +54,8 @@ typedef struct {
     bool has_peer;
     uint8_t peer_eui[8];
     uint8_t peer_short[2];
-    uint32_t last_auth_sequence;
-    bool has_auth_sequence;
+    uint32_t last_sequence;
+    bool has_sequence;
     uwb_ranging_peer_t peer;
     int64_t last_activity_ms;
     int64_t last_heartbeat_ms;
@@ -69,9 +66,7 @@ typedef struct {
 } ranging_context_t;
 
 static const char *TAG = "uwb_ranging";
-static uint8_t auth_key[32];
-static psa_key_id_t auth_key_id;
-static uint32_t tx_auth_sequence;
+static uint32_t tx_sequence;
 static uint32_t get_u32(const uint8_t *in);
 static void put_u32(uint8_t *out, uint32_t value);
 static portMUX_TYPE runtime_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -159,74 +154,14 @@ static uint32_t current_period_ms(void)
     return period_ms;
 }
 
-static int hex_value(char ch)
+static bool valid_frame_length(size_t length)
 {
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-    return -1;
-}
-
-static esp_err_t load_auth_key(void)
-{
-    const char *encoded = CONFIG_UWB_RANGING_AUTH_KEY;
-    if (strlen(encoded) != 64) return ESP_ERR_INVALID_ARG;
-    for (unsigned i = 0; i < sizeof(auth_key); ++i) {
-        int high = hex_value(encoded[i * 2]);
-        int low = hex_value(encoded[i * 2 + 1]);
-        if (high < 0 || low < 0) return ESP_ERR_INVALID_ARG;
-        auth_key[i] = (uint8_t)((high << 4) | low);
-    }
-    if (psa_crypto_init() != PSA_SUCCESS) return ESP_FAIL;
-
-    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
-    psa_set_key_algorithm(&attributes, PSA_ALG_HMAC(PSA_ALG_SHA_256));
-    psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
-    psa_set_key_bits(&attributes, sizeof(auth_key) * 8);
-    psa_status_t status = psa_import_key(&attributes, auth_key, sizeof(auth_key),
-                                         &auth_key_id);
-    psa_reset_key_attributes(&attributes);
-    memset(auth_key, 0, sizeof(auth_key));
-    if (status != PSA_SUCCESS) return ESP_FAIL;
-    return ESP_OK;
-}
-
-static bool compute_auth_digest(const uint8_t *input, size_t input_length,
-                               uint8_t digest[32])
-{
-    size_t digest_length = 0;
-    return psa_mac_compute(auth_key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256),
-                           input, input_length, digest, 32,
-                           &digest_length) == PSA_SUCCESS && digest_length == 32;
-}
-
-static bool sign_frame(uint8_t frame[FRAME_LEN])
-{
-    uint8_t digest[32];
-    if (!compute_auth_digest(frame, AUTH_TAG_OFFSET, digest))
-        return false;
-    memcpy(frame + AUTH_TAG_OFFSET, digest, AUTH_TAG_LEN);
-    memset(digest, 0, sizeof(digest));
-    return true;
-}
-
-static bool verify_frame(const uint8_t *frame, size_t length)
-{
-    if (length != FRAME_LEN) return false;
-    uint8_t digest[32];
-    if (!compute_auth_digest(frame, AUTH_TAG_OFFSET, digest))
-        return false;
-    uint8_t difference = 0;
-    for (unsigned i = 0; i < AUTH_TAG_LEN; ++i)
-        difference |= digest[i] ^ frame[AUTH_TAG_OFFSET + i];
-    memset(digest, 0, sizeof(digest));
-    return difference == 0;
+    return length == FRAME_LEN;
 }
 
 static bool accept_sequence(const uint8_t *frame, uint32_t *last, bool *seen)
 {
-    uint32_t sequence = get_u32(frame + AUTH_SEQ_OFFSET);
+    uint32_t sequence = get_u32(frame + SEQUENCE_OFFSET);
     if (*seen && (int32_t)(sequence - *last) <= 0) return false;
     *last = sequence;
     *seen = true;
@@ -236,8 +171,8 @@ static bool accept_sequence(const uint8_t *frame, uint32_t *last, bool *seen)
 static esp_err_t transmit_frame(uint8_t frame[FRAME_LEN], uint64_t transmit_at,
                                 uint64_t *tx_timestamp)
 {
-    put_u32(frame + AUTH_SEQ_OFFSET, ++tx_auth_sequence);
-    if (!sign_frame(frame)) return ESP_FAIL;
+    put_u32(frame + SEQUENCE_OFFSET, ++tx_sequence);
+    memset(frame + RESERVED_OFFSET, 0, RESERVED_LEN);
     return dw1000_transmit(frame, FRAME_LEN, transmit_at, tx_timestamp);
 }
 
@@ -412,10 +347,12 @@ static void forget_inactive_peer(ranging_context_t *ctx)
 static void heartbeat(ranging_context_t *ctx)
 {
     int64_t now = now_ms();
-    if (now - ctx->last_heartbeat_ms >= 2000) {
+    uint32_t interval_ms = ctx->config.waiting_log_interval_ms;
+    if (!interval_ms) interval_ms = 2000;
+    if (now - ctx->last_heartbeat_ms >= interval_ms) {
         ctx->last_heartbeat_ms = now;
-        ESP_LOGI(TAG, "%s running - waiting for ranging packet",
-                 ctx->config.role == UWB_RANGING_ANCHOR ? "ANCHOR" : "TAG");
+        if (ctx->config.on_waiting)
+            ctx->config.on_waiting(ctx->config.role);
     }
 }
 
@@ -469,6 +406,7 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
     uint8_t frame[FRAME_LEN];
 
     for (;;) {
+        sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
         if (role_changed(ctx)) return ESP_OK;
         apply_antenna_delay();
         if (is_paused()) {
@@ -482,7 +420,7 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         uint64_t poll_rx = 0;
         esp_err_t err = dw1000_receive(frame, sizeof(frame), &length, &poll_rx, 250);
         if (err == ESP_ERR_TIMEOUT) continue;
-        if (err != ESP_OK || !verify_frame(frame, length)) continue;
+        if (err != ESP_OK || !valid_frame_length(length)) continue;
 
         int type = message_type(frame, length);
         if (type == MSG_BLINK) {
@@ -492,9 +430,9 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
             uint8_t blink_sequence = frame[1];
             decode_blink(frame, ctx->peer_eui, ctx->peer_short);
             is_new |= memcmp(previous_eui, ctx->peer_eui, sizeof(previous_eui)) != 0;
-            if (is_new) ctx->has_auth_sequence = false;
-            if (!accept_sequence(frame, &ctx->last_auth_sequence,
-                                 &ctx->has_auth_sequence)) continue;
+            if (is_new) ctx->has_sequence = false;
+            if (!accept_sequence(frame, &ctx->last_sequence,
+                                 &ctx->has_sequence)) continue;
             ctx->has_peer = true;
             update_peer_id(ctx, frame, length);
             peer_active(ctx);
@@ -522,8 +460,8 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         }
         if (!ctx->has_peer || type != MSG_POLL || !short_for_us(ctx, frame) || !from_peer(ctx, frame))
             continue;
-        if (!accept_sequence(frame, &ctx->last_auth_sequence,
-                             &ctx->has_auth_sequence)) continue;
+        if (!accept_sequence(frame, &ctx->last_sequence,
+                             &ctx->has_sequence)) continue;
 
         int entry = find_our_entry(ctx, frame, length, 4);
         if (entry < 0) continue;
@@ -539,11 +477,11 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
 
         uint64_t range_rx = 0;
         err = dw1000_receive(frame, sizeof(frame), &length, &range_rx, 150);
-        if (err != ESP_OK || !verify_frame(frame, length) ||
+        if (err != ESP_OK || !valid_frame_length(length) ||
             message_type(frame, length) != MSG_RANGE ||
             !short_for_us(ctx, frame) || !from_peer(ctx, frame)) continue;
-        if (!accept_sequence(frame, &ctx->last_auth_sequence,
-                             &ctx->has_auth_sequence)) continue;
+        if (!accept_sequence(frame, &ctx->last_sequence,
+                             &ctx->has_sequence)) continue;
         entry = find_our_entry(ctx, frame, length, 17);
         if (entry < 0) continue;
 
@@ -592,8 +530,8 @@ static bool remember_tag_anchor(ranging_context_t *ctx, const uint8_t *frame,
     unsigned index = is_new ? ctx->anchor_count++ : (unsigned)found;
     tag_anchor_t *anchor = &ctx->anchors[index];
     if (is_new) memset(anchor, 0, sizeof(*anchor));
-    if (!accept_sequence(frame, &anchor->last_auth_sequence,
-                         &anchor->has_auth_sequence)) return false;
+    if (!accept_sequence(frame, &anchor->last_sequence,
+                         &anchor->has_sequence)) return false;
     memcpy(anchor->short_address, short_address, 2);
     memcpy(anchor->eui, frame + ID_EXTENSION,
            length >= ID_EXTENSION + 6 ? 6 : 0);
@@ -621,7 +559,7 @@ static void discover_anchors(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
         esp_err_t err = dw1000_receive(frame, FRAME_LEN, &length, NULL,
                                       remaining_ms ? remaining_ms : 1);
         if (err == ESP_ERR_TIMEOUT) break;
-        if (err != ESP_OK || !verify_frame(frame, length) ||
+        if (err != ESP_OK || !valid_frame_length(length) ||
             message_type(frame, length) != MSG_RANGING_INIT ||
             !long_for_us(ctx, frame))
             continue;
@@ -647,8 +585,8 @@ static void load_tag_anchor(ranging_context_t *ctx, unsigned index)
     memcpy(ctx->peer_short, anchor->short_address, sizeof(ctx->peer_short));
     ctx->peer = anchor->peer;
     ctx->last_activity_ms = anchor->last_activity_ms;
-    ctx->last_auth_sequence = anchor->last_auth_sequence;
-    ctx->has_auth_sequence = anchor->has_auth_sequence;
+    ctx->last_sequence = anchor->last_sequence;
+    ctx->has_sequence = anchor->has_sequence;
     ctx->has_peer = true;
 }
 
@@ -656,8 +594,8 @@ static void save_tag_anchor(ranging_context_t *ctx, unsigned index)
 {
     ctx->anchors[index].peer = ctx->peer;
     ctx->anchors[index].last_activity_ms = ctx->last_activity_ms;
-    ctx->anchors[index].last_auth_sequence = ctx->last_auth_sequence;
-    ctx->anchors[index].has_auth_sequence = ctx->has_auth_sequence;
+    ctx->anchors[index].last_sequence = ctx->last_sequence;
+    ctx->anchors[index].has_sequence = ctx->has_sequence;
 }
 
 static void forget_inactive_anchors(ranging_context_t *ctx)
@@ -691,11 +629,11 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     size_t length = 0;
     uint64_t ack_rx = 0;
     esp_err_t err = dw1000_receive(frame, FRAME_LEN, &length, &ack_rx, 150);
-    if (err != ESP_OK || !verify_frame(frame, length) ||
+    if (err != ESP_OK || !valid_frame_length(length) ||
         message_type(frame, length) != MSG_POLL_ACK ||
         !short_for_us(ctx, frame) || !from_peer(ctx, frame)) return ESP_ERR_INVALID_RESPONSE;
-    if (!accept_sequence(frame, &ctx->last_auth_sequence,
-                         &ctx->has_auth_sequence)) return ESP_ERR_INVALID_RESPONSE;
+    if (!accept_sequence(frame, &ctx->last_sequence,
+                         &ctx->has_sequence)) return ESP_ERR_INVALID_RESPONSE;
 
     uint64_t range_at = dw1000_future_tx_time(ctx->config.reply_delay_us);
     if (!range_at) return ESP_FAIL;
@@ -708,11 +646,11 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     ESP_RETURN_ON_ERROR(transmit_frame(frame, range_at, NULL), TAG, "RANGE transmit");
 
     err = dw1000_receive(frame, FRAME_LEN, &length, NULL, 150);
-    if (err != ESP_OK || !verify_frame(frame, length) ||
+    if (err != ESP_OK || !valid_frame_length(length) ||
         message_type(frame, length) != MSG_RANGE_REPORT ||
         !short_for_us(ctx, frame) || !from_peer(ctx, frame)) return ESP_ERR_INVALID_RESPONSE;
-    if (!accept_sequence(frame, &ctx->last_auth_sequence,
-                         &ctx->has_auth_sequence)) return ESP_ERR_INVALID_RESPONSE;
+    if (!accept_sequence(frame, &ctx->last_sequence,
+                         &ctx->has_sequence)) return ESP_ERR_INVALID_RESPONSE;
     float distance, rx_power;
     memcpy(&distance, frame + SHORT_MAC_LEN + 1, sizeof(distance));
     memcpy(&rx_power, frame + SHORT_MAC_LEN + 5, sizeof(rx_power));
@@ -740,6 +678,7 @@ static esp_err_t run_tag(ranging_context_t *ctx)
              own_short);
     uint8_t frame[FRAME_LEN];
     for (;;) {
+        sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
         if (role_changed(ctx)) return ESP_OK;
         apply_antenna_delay();
         if (is_paused()) {
@@ -764,11 +703,8 @@ static esp_err_t run_tag(ranging_context_t *ctx)
 esp_err_t uwb_ranging_run(const uwb_ranging_config_t *config)
 {
     if (!config || !config->reply_delay_us || !config->tag_period_ms) return ESP_ERR_INVALID_ARG;
-    esp_err_t auth_err = load_auth_key();
-    if (auth_err != ESP_OK) {
-        ESP_LOGE(TAG, "configure a shared 64-character hex UWB ranging key in menuconfig");
-        return auth_err;
-    }
+    sensor_coordinator_register(SENSOR_COORDINATOR_UWB);
+    sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
     portENTER_CRITICAL(&runtime_lock);
     if (!runtime_period_ms) runtime_period_ms = config->tag_period_ms;
     if (!role_initialized) {
@@ -802,6 +738,11 @@ esp_err_t uwb_ranging_run(const uwb_ranging_config_t *config)
         ctx.last_activity_ms = ctx.last_heartbeat_ms = now_ms();
         esp_err_t err = ctx.config.role == UWB_RANGING_ANCHOR
                             ? run_anchor(&ctx) : run_tag(&ctx);
-        if (err != ESP_OK) return err;
+        if (err != ESP_OK) {
+            esp_err_t deinit_err = dw1000_deinit();
+            if (deinit_err != ESP_OK)
+                ESP_LOGE(TAG, "DW1000 cleanup failed: %s", esp_err_to_name(deinit_err));
+            return err;
+        }
     }
 }

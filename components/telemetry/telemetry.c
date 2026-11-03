@@ -19,9 +19,6 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
-#ifndef CONFIG_UWB_DEVICE_SECRET
-#define CONFIG_UWB_DEVICE_SECRET ""
-#endif
 #ifdef CONFIG_UWB_CIR_ENABLE
 #include "dw1000.h"
 #endif
@@ -46,6 +43,9 @@ typedef struct {
     float imu_accel[3];
     float imu_gyro[3];
     float imu_temperature_c;
+    bool battery_valid;
+    float battery_voltage;
+    float battery_percent;
     telemetry_sample_t peer_latest[TELEMETRY_MAX_PEERS];
     uint8_t peer_count;
 } shared_state_t;
@@ -65,33 +65,6 @@ extern const uint8_t device_cert_pem_end[] asm("_binary_device_cert_pem_end");
 extern const uint8_t device_key_pem_start[] asm("_binary_device_key_pem_start");
 extern const uint8_t device_key_pem_end[] asm("_binary_device_key_pem_end");
 #endif
-
-static bool request_authorized(httpd_req_t *request)
-{
-    const size_t secret_len = strlen(CONFIG_UWB_DEVICE_SECRET);
-    const size_t expected_len = sizeof("Bearer ") - 1 + secret_len;
-    size_t header_len = httpd_req_get_hdr_value_len(request, "Authorization");
-    if (header_len != expected_len || header_len > 80) return false;
-    char header[81];
-    if (httpd_req_get_hdr_value_str(request, "Authorization", header,
-                                    sizeof(header)) != ESP_OK)
-        return false;
-    if (memcmp(header, "Bearer ", sizeof("Bearer ") - 1)) return false;
-    const char *secret = CONFIG_UWB_DEVICE_SECRET;
-    unsigned difference = 0;
-    for (size_t i = 0; i < secret_len; ++i)
-        difference |= (unsigned char)header[sizeof("Bearer ") - 1 + i] ^
-                      (unsigned char)secret[i];
-    return difference == 0;
-}
-
-static esp_err_t require_authorized(httpd_req_t *request)
-{
-    if (request_authorized(request)) return ESP_OK;
-    httpd_resp_set_hdr(request, "WWW-Authenticate", "Bearer");
-    return httpd_resp_send_err(request, HTTPD_401_UNAUTHORIZED,
-                               "valid device key required");
-}
 
 static BaseType_t network_core(void)
 {
@@ -170,10 +143,17 @@ void telemetry_update_imu(bool valid, const float accel[3],
     portEXIT_CRITICAL(&state_lock);
 }
 
+void telemetry_update_battery(float voltage, float percent)
+{
+    portENTER_CRITICAL(&state_lock);
+    state.battery_valid = true;
+    state.battery_voltage = voltage;
+    state.battery_percent = percent;
+    portEXIT_CRITICAL(&state_lock);
+}
+
 static esp_err_t telemetry_handler(httpd_req_t *request)
 {
-    esp_err_t auth_err = require_authorized(request);
-    if (auth_err != ESP_OK) return auth_err;
     shared_state_t snapshot;
     portENTER_CRITICAL(&state_lock);
     snapshot = state;
@@ -220,10 +200,10 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
         snapshot.imu_accel[2], snapshot.imu_gyro[0],
         snapshot.imu_gyro[1], snapshot.imu_gyro[2],
         snapshot.imu_temperature_c,
-        snapshot.latest.battery_valid ? "true" : "false",
+        snapshot.battery_valid ? "true" : "false",
         snapshot.sensing_interval_ms, snapshot.send_interval_ms,
         snapshot.antenna_delay,
-        snapshot.latest.battery_voltage, snapshot.latest.battery_percent);
+        snapshot.battery_voltage, snapshot.battery_percent);
     if (length < 0 || (size_t)length >= sizeof(json))
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "telemetry encoding failed");
@@ -337,8 +317,6 @@ static bool parse_control(const char *body, shared_state_t *updated)
 
 static esp_err_t control_handler(httpd_req_t *request)
 {
-    esp_err_t auth_err = require_authorized(request);
-    if (auth_err != ESP_OK) return auth_err;
     /* Desktop clients already use JSON. Reject browser form/text requests;
      * this blocks simple cross-origin POSTs but is not authentication. */
     char content_type[64];
@@ -395,8 +373,6 @@ static esp_err_t control_handler(httpd_req_t *request)
 
 static esp_err_t cir_handler(httpd_req_t *request)
 {
-    esp_err_t auth_err = require_authorized(request);
-    if (auth_err != ESP_OK) return auth_err;
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
 #ifndef CONFIG_UWB_CIR_ENABLE
@@ -514,11 +490,6 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
         config->buffer_length < 2 || config->sensing_interval_ms < 20 ||
         config->send_interval_ms < 50)
         return ESP_ERR_INVALID_ARG;
-    if (strlen(CONFIG_UWB_DEVICE_SECRET) != 64 ||
-        strspn(CONFIG_UWB_DEVICE_SECRET, "0123456789abcdefABCDEF") != 64) {
-        ESP_LOGE(TAG, "configure a unique 64-character hex device secret in menuconfig");
-        return ESP_ERR_INVALID_ARG;
-    }
     if (samples || collector_task_handle || api_server)
         return ESP_ERR_INVALID_STATE;
     snprintf(device_mac, sizeof(device_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -560,8 +531,12 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
     https_config.port_secure = 443;
     err = httpd_ssl_start(&api_server, &https_config);
 #else
-    ESP_LOGE(TAG, "HTTPS is disabled; set CONFIG_UWB_TLS_ENABLE and provide per-device certificate/key");
-    err = ESP_ERR_NOT_SUPPORTED;
+    httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
+    http_config.core_id = network_core();
+    http_config.stack_size = 8192;
+    http_config.lru_purge_enable = true;
+    http_config.max_uri_handlers = 4;
+    err = httpd_start(&api_server, &http_config);
 #endif
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "HTTP server start failed: %s", esp_err_to_name(err));
@@ -592,14 +567,22 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
                                 3, NULL, network_core()) != pdPASS)
         ESP_LOGW(TAG, "MAC discovery task unavailable; connect by IP");
 
+#ifdef CONFIG_UWB_TLS_ENABLE
     ESP_LOGI(TAG, "dashboard API=https://%s MAC=%s cores=%d",
              device_ip, device_mac, portNUM_PROCESSORS);
+#else
+    ESP_LOGW(TAG, "dashboard API=http://%s (local network only; no TLS)", device_ip);
+#endif
     return ESP_OK;
 
 fail:
     ESP_LOGE(TAG, "telemetry service setup failed: %s", esp_err_to_name(err));
     if (api_server) {
+#ifdef CONFIG_UWB_TLS_ENABLE
         httpd_ssl_stop(api_server);
+#else
+        httpd_stop(api_server);
+#endif
         api_server = NULL;
     }
     if (collector_task_handle) {

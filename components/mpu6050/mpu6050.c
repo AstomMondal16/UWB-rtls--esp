@@ -10,6 +10,7 @@
 #define REG_ACCEL_CONFIG 0x1c
 #define REG_ACCEL_XOUT_H 0x3b
 #define REG_PWR_MGMT_1   0x6b
+#define I2C_TRANSACTION_TIMEOUT_MS 100
 
 struct mpu6050_t {
     i2c_master_dev_handle_t device;
@@ -22,7 +23,8 @@ static esp_err_t write_register(mpu6050_handle_t handle, uint8_t reg,
                                 uint8_t value)
 {
     uint8_t command[] = {reg, value};
-    return i2c_master_transmit(handle->device, command, sizeof(command), -1);
+    return i2c_master_transmit(handle->device, command, sizeof(command),
+                               I2C_TRANSACTION_TIMEOUT_MS);
 }
 
 static int16_t be16(const uint8_t *bytes)
@@ -87,7 +89,7 @@ esp_err_t mpu6050_read(mpu6050_handle_t handle, mpu6050_data_t *data)
     uint8_t reg = REG_ACCEL_XOUT_H;
     uint8_t raw[14];
     esp_err_t err = i2c_master_transmit_receive(handle->device, &reg, 1, raw,
-                                                 sizeof(raw), -1);
+                                                 sizeof(raw), I2C_TRANSACTION_TIMEOUT_MS);
     if (err != ESP_OK) return err;
 
     data->raw_accel_x = be16(&raw[0]);

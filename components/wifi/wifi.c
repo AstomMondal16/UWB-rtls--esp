@@ -14,10 +14,6 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
-#ifndef CONFIG_UWB_BLE_DEVICE_ID
-#define CONFIG_UWB_BLE_DEVICE_ID ""
-#endif
-
 #define CONNECTED BIT0
 #define RETRY BIT1
 #define BUTTON_GPIO GPIO_NUM_17
@@ -32,6 +28,7 @@ static wifi_info_t *info_out;
 static wifi_connection_callback_t connection_cb;
 static void *connection_arg;
 static bool previous_valid;
+static bool provisioning_transaction_pending;
 static volatile bool retry_saved_network;
 static wifi_config_t previous_config;
 
@@ -124,14 +121,6 @@ static esp_err_t recover_interrupted_transaction(void)
     return err;
 }
 
-static void stop_provisioning_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(10000));
-    ble_provisioning_stop();
-    vTaskDelete(NULL);
-}
-
 static esp_err_t prepare_wifi_provisioning(void *arg)
 {
     (void)arg;
@@ -146,6 +135,7 @@ static esp_err_t prepare_wifi_provisioning(void *arg)
     previous_valid = current.sta.ssid[0] != '\0';
     wifi_config_t backup = previous_valid ? current : (wifi_config_t){0};
     err = save_transaction(&backup, true);
+    if (err == ESP_OK) provisioning_transaction_pending = true;
     if (err != ESP_OK)
         ESP_LOGE(TAG, "could not save Wi-Fi rollback config: %s", esp_err_to_name(err));
     return err;
@@ -160,8 +150,9 @@ static void provisioning_event(ble_provisioning_event_t event, const void *data,
         retry_saved_network = false;
         xEventGroupClearBits(events, RETRY);
         const wifi_sta_config_t *received = data;
-        ESP_LOGI(TAG, "Wi-Fi credentials received (SSID length %u)",
-                 (unsigned)strnlen((const char *)received->ssid, sizeof(received->ssid)));
+        if (received)
+            ESP_LOGI(TAG, "Wi-Fi credentials received (SSID length %u)",
+                     (unsigned)strnlen((const char *)received->ssid, sizeof(received->ssid)));
     } else if (event == BLE_PROVISIONING_CREDENTIALS_SUCCESS) {
         retry_saved_network = false;
         wifi_config_t current = {0};
@@ -175,12 +166,12 @@ static void provisioning_event(ble_provisioning_event_t event, const void *data,
             if (restore_err != ESP_OK)
                 ESP_LOGE(TAG, "Wi-Fi rollback failed; recovery remains pending: %s",
                          esp_err_to_name(restore_err));
+            else provisioning_transaction_pending = false;
+            ble_provisioning_request_stop();
         } else {
             ESP_LOGI(TAG, "provisioned Wi-Fi connection succeeded");
-            if (xTaskCreate(stop_provisioning_task, "prov_stop", 2048, NULL, 3, NULL) != pdPASS) {
-                ESP_LOGW(TAG, "could not schedule BLE shutdown; stopping provisioning now");
-                ble_provisioning_stop();
-            }
+            provisioning_transaction_pending = false;
+            ble_provisioning_request_stop();
         }
     } else if (event == BLE_PROVISIONING_CREDENTIALS_FAILED) {
         retry_saved_network = false;
@@ -191,10 +182,13 @@ static void provisioning_event(ble_provisioning_event_t event, const void *data,
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Wi-Fi rollback failed; recovery remains pending: %s",
                      esp_err_to_name(err));
-        } else if (previous_valid) {
-            retry_saved_network = true;
-            esp_wifi_connect();
-            xEventGroupSetBits(events, RETRY);
+        } else {
+            provisioning_transaction_pending = false;
+            if (previous_valid) {
+                retry_saved_network = true;
+                esp_wifi_connect();
+                xEventGroupSetBits(events, RETRY);
+            }
         }
     } else if (event == BLE_PROVISIONING_START_FAILED) {
         const esp_err_t *start_error = data;
@@ -203,9 +197,18 @@ static void provisioning_event(ble_provisioning_event_t event, const void *data,
         if (restore_err != ESP_OK)
             ESP_LOGE(TAG, "could not clear provisioning rollback after start failure: %s",
                      esp_err_to_name(restore_err));
+        else provisioning_transaction_pending = false;
         ESP_LOGE(TAG, "BLE provisioning start failed: %s",
                  start_error ? esp_err_to_name(*start_error) : "unknown error");
     } else if (event == BLE_PROVISIONING_STOPPED) {
+        if (provisioning_transaction_pending) {
+            wifi_config_t empty = {0};
+            const wifi_config_t *restore = previous_valid ? &previous_config : &empty;
+            esp_err_t err = restore_station_config(restore);
+            if (err == ESP_OK) provisioning_transaction_pending = false;
+            else ESP_LOGE(TAG, "could not rollback interrupted provisioning: %s",
+                          esp_err_to_name(err));
+        }
         ESP_LOGI(TAG, "BLE provisioning stopped");
     }
 }
@@ -280,14 +283,21 @@ esp_err_t wifi_connect(wifi_info_t *info)
     uint8_t mac[6];
     if ((err = esp_wifi_get_mac(WIFI_IF_STA, mac)) != ESP_OK) return err;
     char service_name[33];
-    if (CONFIG_UWB_BLE_DEVICE_ID[0]) {
-        if (strlen(CONFIG_UWB_BLE_DEVICE_ID) > sizeof(service_name) - sizeof("PROV_"))
-            return ESP_ERR_INVALID_SIZE;
-        snprintf(service_name, sizeof(service_name), "PROV_%s", CONFIG_UWB_BLE_DEVICE_ID);
+    if (CONFIG_UWB_BLE_SERVICE_NAME[0]) {
+        const char *configured_name = CONFIG_UWB_BLE_SERVICE_NAME;
+        size_t configured_length = strlen(configured_name);
+        if (configured_length >= sizeof(service_name)) {
+            ESP_LOGE(TAG, "BLE provisioning name is too long (%u characters; maximum is %u)",
+                     (unsigned)configured_length,
+                     (unsigned)(sizeof(service_name) - 1));
+            return ESP_ERR_INVALID_ARG;
+        }
+        strlcpy(service_name, configured_name, sizeof(service_name));
     } else {
-        snprintf(service_name, sizeof(service_name), "PROV_%02X%02X%02X",
+        snprintf(service_name, sizeof(service_name), "UWB_%02X%02X%02X",
                  mac[3], mac[4], mac[5]);
     }
+    ESP_LOGI(TAG, "BLE provisioning advertised name: %s", service_name);
     if ((err = ble_provisioning_init(service_name, prepare_wifi_provisioning,
                                      provisioning_event, NULL)) != ESP_OK)
         return err;
@@ -309,7 +319,9 @@ esp_err_t wifi_connect(wifi_info_t *info)
         }
     }
 
-    if (xTaskCreate(retry_task, "wifi_retry", 3072, NULL, 4, NULL) != pdPASS) return ESP_ERR_NO_MEM;
+    if (xTaskCreatePinnedToCore(retry_task, "wifi_retry", 3072, NULL, 4, NULL,
+                                portNUM_PROCESSORS > 1 ? 0 : tskNO_AFFINITY) != pdPASS)
+        return ESP_ERR_NO_MEM;
 
     ESP_LOGI(TAG, "waiting for Wi-Fi before UWB initialization");
     xEventGroupWaitBits(events, CONNECTED, pdFALSE, pdTRUE, portMAX_DELAY);

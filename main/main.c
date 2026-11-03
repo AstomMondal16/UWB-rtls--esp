@@ -5,7 +5,9 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "sensor_coordinator.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "telemetry.h"
@@ -24,6 +26,9 @@
 static const char *TAG = "UWB";
 static wifi_info_t network;
 static volatile bool wifi_connected = false;
+#define IMU_LOG_INTERVAL_US 1000000LL
+#define BATTERY_LOG_INTERVAL_MS 5000
+#define UWB_WAITING_LOG_INTERVAL_MS 2000
 #define RANGE_FILTER_COUNT 8
 typedef struct {
     bool used;
@@ -50,6 +55,23 @@ static uwb_ranging_role_t active_role = UWB_RANGING_TAG;
 static const char *role_name(uwb_ranging_role_t role)
 {
     return role == UWB_RANGING_ANCHOR ? "anchor" : "tag";
+}
+
+static void log_uwb_waiting(uwb_ranging_role_t role)
+{
+    ESP_LOGI(TAG, "%s running - waiting for ranging packet",
+             role == UWB_RANGING_ANCHOR ? "ANCHOR" : "TAG");
+}
+
+static void sensor_delay_with_checkpoint(uint32_t sensor, uint32_t delay_ms)
+{
+    while (delay_ms) {
+        sensor_coordinator_checkpoint(sensor);
+        uint32_t slice_ms = delay_ms > 50 ? 50 : delay_ms;
+        vTaskDelay(pdMS_TO_TICKS(slice_ms));
+        delay_ms -= slice_ms;
+    }
+    sensor_coordinator_checkpoint(sensor);
 }
 
 static void load_antenna_delay(void)
@@ -108,6 +130,16 @@ static void apply_dashboard_control(bool streaming, uint32_t sensing_interval_ms
 
 #ifdef CONFIG_UWB_MPU6050_ENABLE
 static mpu6050_handle_t imu;
+static i2c_master_bus_handle_t imu_bus;
+
+static void log_imu_reading(const mpu6050_data_t *data)
+{
+    ESP_LOGI(TAG, "IMU accel=[%+.3f,%+.3f,%+.3f] g "
+             "gyro=[%+.3f,%+.3f,%+.3f] dps temp=%.2f C",
+             data->accel_x, data->accel_y, data->accel_z,
+             data->gyro_x, data->gyro_y, data->gyro_z,
+             data->temperature);
+}
 
 static esp_err_t init_imu(void)
 {
@@ -119,8 +151,7 @@ static esp_err_t init_imu(void)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-    i2c_master_bus_handle_t bus;
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_config, &bus), TAG,
+    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_config, &imu_bus), TAG,
                         "MPU6050 I2C initialization");
 
     const mpu6050_config_t config = {
@@ -128,16 +159,28 @@ static esp_err_t init_imu(void)
         .gyro_range = MPU6050_GYRO_RANGE_250DPS,
         .sample_rate_divider = 9,
     };
-    esp_err_t err = mpu6050_create(bus, 0x68, &config, &imu);
+    esp_err_t err = mpu6050_create(imu_bus, 0x68, &config, &imu);
     uint8_t address = 0x68;
     if (err != ESP_OK) {
         address = 0x69;
-        err = mpu6050_create(bus, address, &config, &imu);
+        err = mpu6050_create(imu_bus, address, &config, &imu);
     }
-    ESP_RETURN_ON_ERROR(err, TAG, "MPU6050 not found at 0x68 or 0x69");
+    if (err != ESP_OK) {
+        i2c_del_master_bus(imu_bus);
+        imu_bus = NULL;
+        ESP_LOGE(TAG, "MPU6050 not found at 0x68 or 0x69: %s", esp_err_to_name(err));
+        return err;
+    }
     ESP_LOGI(TAG, "Keep MPU6050 still in any orientation: calibrating gyro");
-    ESP_RETURN_ON_ERROR(mpu6050_calibrate(imu, 300, 5), TAG,
-                        "MPU6050 calibration");
+    err = mpu6050_calibrate(imu, 300, 5);
+    if (err != ESP_OK) {
+        mpu6050_delete(imu);
+        imu = NULL;
+        i2c_del_master_bus(imu_bus);
+        imu_bus = NULL;
+        ESP_LOGE(TAG, "MPU6050 calibration failed: %s", esp_err_to_name(err));
+        return err;
+    }
     ESP_LOGI(TAG, "MPU6050 ready at 0x%02x on SDA=%d SCL=%d", address,
              CONFIG_UWB_MPU6050_SDA_GPIO, CONFIG_UWB_MPU6050_SCL_GPIO);
     return ESP_OK;
@@ -146,13 +189,24 @@ static esp_err_t init_imu(void)
 static void imu_sampling_task(void *argument)
 {
     (void)argument;
-    TickType_t next_wake = xTaskGetTickCount();
-    unsigned consecutive_errors = 0;
-    const TickType_t interval = pdMS_TO_TICKS(CONFIG_UWB_TAG_PERIOD_MS);
+    sensor_coordinator_register(SENSOR_COORDINATOR_IMU);
+    uint32_t retry_ms = 1000;
     for (;;) {
+        sensor_coordinator_checkpoint(SENSOR_COORDINATOR_IMU);
+        if (!imu) {
+            esp_err_t init_err = init_imu();
+            if (init_err != ESP_OK) {
+                ESP_LOGW(TAG, "IMU initialization failed: %s; retrying in %" PRIu32 " ms",
+                         esp_err_to_name(init_err), retry_ms);
+                sensor_delay_with_checkpoint(SENSOR_COORDINATOR_IMU, retry_ms);
+                if (retry_ms < 30000) retry_ms *= 2;
+                if (retry_ms > 30000) retry_ms = 30000;
+                continue;
+            }
+            retry_ms = 1000;
+        }
         if (!imu_streaming) {
             vTaskDelay(pdMS_TO_TICKS(20));
-            next_wake = xTaskGetTickCount();
             continue;
         }
 
@@ -162,18 +216,38 @@ static void imu_sampling_task(void *argument)
             const float accel[3] = {data.accel_x, data.accel_y, data.accel_z};
             const float gyro[3] = {data.gyro_x, data.gyro_y, data.gyro_z};
             telemetry_update_imu(true, accel, gyro, data.temperature);
-            consecutive_errors = 0;
+            static int64_t last_imu_log_us;
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_imu_log_us >= IMU_LOG_INTERVAL_US) {
+                log_imu_reading(&data);
+                last_imu_log_us = now_us;
+            }
         } else {
             telemetry_update_imu(false, NULL, NULL, 0);
-            if (++consecutive_errors == 1 || consecutive_errors % 100 == 0)
-                ESP_LOGW(TAG, "MPU6050 read failed: %s", esp_err_to_name(err));
+            ESP_LOGW(TAG, "MPU6050 read failed: %s; reinitializing", esp_err_to_name(err));
+            mpu6050_delete(imu);
+            imu = NULL;
+            i2c_del_master_bus(imu_bus);
+            imu_bus = NULL;
+            sensor_delay_with_checkpoint(SENSOR_COORDINATOR_IMU, retry_ms);
+            if (retry_ms < 30000) retry_ms *= 2;
+            if (retry_ms > 30000) retry_ms = 30000;
+            continue;
         }
-        vTaskDelayUntil(&next_wake, interval);
+        retry_ms = 1000;
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_UWB_TAG_PERIOD_MS));
     }
 }
 #endif
 
 #ifdef CONFIG_UWB_BATTERY_MONITOR_ENABLE
+static SemaphoreHandle_t battery_read_lock;
+
+static void log_battery_reading(float voltage, float percent)
+{
+    ESP_LOGI(TAG, "BATTERY %.2f V %.0f%%", voltage, percent);
+}
+
 static esp_err_t init_battery_monitor(void)
 {
     const battery_monitor_config_t config = {
@@ -183,17 +257,47 @@ static esp_err_t init_battery_monitor(void)
         .divider_ratio = 1.39f,
         .sample_count = 16,
     };
-    return battery_monitor_init(&config);
+    battery_read_lock = xSemaphoreCreateMutex();
+    if (!battery_read_lock) return ESP_ERR_NO_MEM;
+    esp_err_t err = battery_monitor_init(&config);
+    if (err != ESP_OK) {
+        vSemaphoreDelete(battery_read_lock);
+        battery_read_lock = NULL;
+    }
+    return err;
 }
 
 static bool read_battery(float *voltage, float *percent)
 {
     battery_monitor_data_t data;
-    if (!voltage || !percent || battery_monitor_read(&data) != ESP_OK)
+    if (sensor_coordinator_ble_active() || !voltage || !percent || !battery_read_lock ||
+        xSemaphoreTake(battery_read_lock, pdMS_TO_TICKS(100)) != pdTRUE)
         return false;
+    esp_err_t err = battery_monitor_read(&data);
+    xSemaphoreGive(battery_read_lock);
+    if (err != ESP_OK) return false;
     *voltage = data.voltage;
     *percent = data.percent;
     return true;
+}
+
+static void battery_logging_task(void *argument)
+{
+    (void)argument;
+    sensor_coordinator_register(SENSOR_COORDINATOR_BATTERY);
+    for (;;) {
+        sensor_coordinator_checkpoint(SENSOR_COORDINATOR_BATTERY);
+        float voltage;
+        float percent;
+        if (read_battery(&voltage, &percent)) {
+            telemetry_update_battery(voltage, percent);
+            log_battery_reading(voltage, percent);
+        } else {
+            ESP_LOGW(TAG, "battery sample unavailable");
+        }
+        /* Sleep until the next sample, or wake early for a BLE pause request. */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BATTERY_LOG_INTERVAL_MS));
+    }
 }
 #endif
 
@@ -283,17 +387,10 @@ static void on_range(const uwb_ranging_peer_t *peer)
     filter->previous_range_ms = sample.timestamp_ms;
     filter->has_previous_range = true;
 
-#ifdef CONFIG_UWB_BATTERY_MONITOR_ENABLE
-    sample.battery_valid = read_battery(&sample.battery_voltage,
-                                        &sample.battery_percent);
-#endif
     telemetry_publish(&sample);
 
-    ESP_LOGI(TAG, "distance=%.3f m speed=%+.3f m/s RX=%.2f dBm "
-             "battery=%s %.2f V %.0f%%",
-             sample.distance_m, sample.speed_mps, sample.rx_power_dbm,
-             sample.battery_valid ? "OK" : "N/A",
-             sample.battery_voltage, sample.battery_percent);
+    ESP_LOGI(TAG, "UWB distance=%.3f m speed=%+.3f m/s RX=%.2f dBm",
+             sample.distance_m, sample.speed_mps, sample.rx_power_dbm);
 }
 
 static void on_wifi_connection_changed(bool connected, void *arg)
@@ -313,15 +410,10 @@ static void sensing_task(void *argument)
 {
     (void)argument;
 #ifdef CONFIG_UWB_MPU6050_ENABLE
-    esp_err_t err = init_imu();
-    if (err != ESP_OK) {
-        imu = NULL;
-        ESP_LOGE(TAG, "IMU unavailable: %s; continuing with UWB",
-                 esp_err_to_name(err));
-    } else if (xTaskCreatePinnedToCore(imu_sampling_task, "imu_sampler", 3072,
+    if (xTaskCreatePinnedToCore(imu_sampling_task, "imu_sampler", 3072,
                                        NULL, 4, NULL,
-                                       portNUM_PROCESSORS > 1 ? 0 : tskNO_AFFINITY) != pdPASS) {
-        ESP_LOGE(TAG, "could not start IMU sampling task");
+                                       portNUM_PROCESSORS > 1 ? 1 : tskNO_AFFINITY) != pdPASS) {
+        ESP_LOGE(TAG, "could not start IMU task; continuing with UWB only");
     }
 #endif
 #ifdef CONFIG_UWB_BATTERY_MONITOR_ENABLE
@@ -329,6 +421,9 @@ static void sensing_task(void *argument)
     if (battery_err != ESP_OK)
         ESP_LOGE(TAG, "battery monitoring unavailable: %s",
                  esp_err_to_name(battery_err));
+    else if (xTaskCreatePinnedToCore(battery_logging_task, "battery_log", 2048, NULL,
+                         2, NULL, portNUM_PROCESSORS > 1 ? 1 : tskNO_AFFINITY) != pdPASS)
+        ESP_LOGE(TAG, "could not start battery logging task");
 #endif
 
     uwb_ranging_config_t config = {
@@ -340,18 +435,29 @@ static void sensing_task(void *argument)
         .on_range = on_range,
         .on_new_device = on_new_device,
         .on_inactive_device = on_inactive_device,
+        .waiting_log_interval_ms = UWB_WAITING_LOG_INTERVAL_MS,
+        .on_waiting = log_uwb_waiting,
     };
     memcpy(config.device_id, network.mac, sizeof(network.mac));
+    sensor_coordinator_register(SENSOR_COORDINATOR_UWB);
     ESP_LOGW(TAG, "sensing started on CPU%d as %s",
              xPortGetCoreID(),
              config.role == UWB_RANGING_ANCHOR ? "ANCHOR" : "TAG");
-    esp_err_t ranging_err = uwb_ranging_run(&config);
-    ESP_LOGE(TAG, "UWB stopped: %s", esp_err_to_name(ranging_err));
-    vTaskDelete(NULL);
+    uint32_t retry_ms = 1000;
+    for (;;) {
+        sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
+        esp_err_t ranging_err = uwb_ranging_run(&config);
+        ESP_LOGE(TAG, "UWB service stopped: %s; retrying in %" PRIu32 " ms",
+                 esp_err_to_name(ranging_err), retry_ms);
+        sensor_delay_with_checkpoint(SENSOR_COORDINATOR_UWB, retry_ms);
+        if (retry_ms < 30000) retry_ms *= 2;
+        if (retry_ms > 30000) retry_ms = 30000;
+    }
 }
 
 void app_main(void)
 {
+    ESP_ERROR_CHECK(sensor_coordinator_init());
     wifi_set_connection_callback(on_wifi_connection_changed, NULL);
     esp_err_t err = wifi_connect(&network);
     if (err != ESP_OK) {
