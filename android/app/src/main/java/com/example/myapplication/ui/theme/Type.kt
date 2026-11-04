@@ -6,29 +6,22 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-// Set of Material typography styles to start with
+// Use the platform sans for familiar Android controls and tabular figures for live data.
+private fun instrumentType(size: Int, line: Int, weight: FontWeight = FontWeight.Normal) = TextStyle(
+    fontFamily = FontFamily.SansSerif, fontWeight = weight, fontSize = size.sp,
+    lineHeight = line.sp, letterSpacing = 0.sp
+)
 val Typography = Typography(
-    bodyLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 16.sp,
-        lineHeight = 24.sp,
-        letterSpacing = 0.5.sp
-    )
-    /* Other default text styles to override
-    titleLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 22.sp,
-        lineHeight = 28.sp,
-        letterSpacing = 0.sp
-    ),
-    labelSmall = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
-        lineHeight = 16.sp,
-        letterSpacing = 0.5.sp
-    )
-    */
+    displaySmall = instrumentType(36, 44, FontWeight.Medium),
+    headlineLarge = instrumentType(32, 40, FontWeight.Medium),
+    headlineMedium = instrumentType(28, 36, FontWeight.Medium),
+    headlineSmall = instrumentType(24, 32, FontWeight.Medium),
+    titleLarge = instrumentType(22, 28, FontWeight.Medium),
+    titleMedium = instrumentType(18, 24, FontWeight.Medium),
+    titleSmall = instrumentType(16, 24, FontWeight.Medium),
+    bodyLarge = instrumentType(16, 24), bodyMedium = instrumentType(14, 20),
+    bodySmall = instrumentType(12, 16),
+    labelLarge = instrumentType(14, 20, FontWeight.Medium),
+    labelMedium = instrumentType(14, 20, FontWeight.Medium),
+    labelSmall = instrumentType(12, 16, FontWeight.Medium)
 )

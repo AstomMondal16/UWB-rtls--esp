@@ -32,7 +32,10 @@ data class DashboardSnapshot(
     val status: String = "READY",
     val collecting: Boolean = false,
     val collected: Int = 0,
-    val calibrationProgress: String = ""
+    val calibrationProgress: String = "",
+    val streamingPending: Boolean = false,
+    val recordingStartCount: Int = 0,
+    val recordingStartedAtMs: Long? = null
 )
 
 fun normalizeMac(value: String): String = value.trim().replace("-", ":").uppercase()

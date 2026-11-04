@@ -54,7 +54,10 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private val csvStore = CsvSessionStore(collectionFile,
         if (collectionFile.isFile) prefs.getInt("csv_record_count", 0) else 0)
     private val lastCollectedSamples = loadCollectedCursors()
-    private var collecting = false
+    @Volatile private var collecting = false
+    private var recordingStartCount = csvStore.count()
+    private var recordingStartedAtMs: Long? = null
+    private var streamingPending = false
     private data class CalibrationTarget(val ip: String, val delay: Int, val expected: Double,
                                          val samples: MutableList<Double> = mutableListOf(),
                                          val seen: MutableSet<Long> = mutableSetOf())
@@ -79,7 +82,8 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
             .sortedByDescending { it.lastSeenAtMs }
         return DashboardSnapshot(devices.toList(), liveDiscovered, onlineStates,
             solvePositions(devices, ranges, now), status, collecting, csvStore.count(),
-            if (calibration.isEmpty()) "" else "${calibration.values.minOf { it.samples.size }}/100 samples per anchor")
+            if (calibration.isEmpty()) "" else "${calibration.values.minOf { it.samples.size }}/100 samples per anchor",
+            streamingPending, recordingStartCount, recordingStartedAtMs)
     }
 
     private fun publish() {
@@ -317,7 +321,11 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                 return@synchronized
             }
             collecting = value
-            status = if (value) "CSV recording started · preserving ${csvStore.count()} existing records"
+            if (value) {
+                recordingStartCount = csvStore.count()
+                recordingStartedAtMs = System.currentTimeMillis()
+            }
+            status = if (value) "CSV recording started · ${csvStore.count()} records already stored"
                 else "CSV recording stopped · ${csvStore.count()} records ready to export"
         }
         publish()
@@ -369,14 +377,18 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         }
     }
 
-    internal fun exportCsv(output: OutputStream, callback: (Result<CsvExportSummary>) -> Unit) {
+    internal fun exportCsv(output: OutputStream, callback: (Result<CsvExportSummary>) -> Unit) =
+        exportCsv(output, 0, callback)
+
+    internal fun exportCsv(output: OutputStream, startingAtRecord: Int,
+                           callback: (Result<CsvExportSummary>) -> Unit) {
         synchronized(lock) {
             collecting = false
-            status = "Exporting ${csvStore.count()} CSV records..."
+            status = "Exporting ${csvStore.count() - startingAtRecord.coerceAtMost(csvStore.count())} CSV records..."
         }
         publish()
         exportWorker.execute {
-            val result = runCatching { csvStore.exportCsv(output) }
+            val result = runCatching { csvStore.exportCsv(output, startingAtRecord) }
             main.post {
                 result.onSuccess { summary ->
                     val first = summary.firstReceivedAt ?: "unknown"
@@ -422,7 +434,8 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
 
     fun setStreaming(value: Boolean) {
         val targets = synchronized(lock) {
-            devices.mapNotNull { device ->
+            if (streamingPending) return
+            val found = devices.mapNotNull { device ->
                 val ip = device.ip.ifBlank {
                     discovered[device.mac]?.ip.orEmpty().ifBlank {
                         states[device.key]?.sample?.optString("ip").orEmpty()
@@ -430,13 +443,20 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                 }
                 ip.takeIf { it.isNotBlank() }?.let { (device.mac.ifBlank { device.ip }) to it }
             }.distinctBy { it.second }
+            if (found.isNotEmpty()) {
+                streamingPending = true
+                status = "Sending monitoring command to ${found.size} device(s)..."
+            }
+            found
         }
         if (targets.isEmpty()) {
             setStatus("Add a device with an IP address before starting tracking")
             return
         }
+        publish()
         workers.execute {
             var succeeded = 0
+            var failure: String? = null
             targets.forEach { (deviceId, ip) ->
                 runCatching {
                     val connection = openApiConnection("$ip/api/control", deviceId)
@@ -450,11 +470,21 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                         }
                         readLimited(connection, MAX_CONTROL_BYTES)
                     } finally { connection.disconnect() }
-                }.onSuccess { succeeded++ }
+                }.onSuccess { succeeded++ }.onFailure { if (failure == null) failure = it.message }
             }
-            setStatus("Tracking ${if (value) "started" else "paused"} on $succeeded/${targets.size} devices")
+            synchronized(lock) {
+                streamingPending = false
+                status = when {
+                    succeeded == targets.size -> "Monitoring ${if (value) "started" else "paused"} on $succeeded device(s)"
+                    succeeded > 0 -> "Monitoring command reached $succeeded/${targets.size} devices"
+                    else -> "Monitoring command failed: ${failure ?: "device did not respond"}"
+                }
+            }
+            publish()
         }
     }
+
+    fun refreshNow() { workers.execute { poll() } }
 
     private fun getJson(address: String, deviceId: String,
                         maxBytes: Int = MAX_TELEMETRY_BYTES): JSONObject {

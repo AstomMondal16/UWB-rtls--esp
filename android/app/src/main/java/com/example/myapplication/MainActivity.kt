@@ -1,29 +1,84 @@
 package com.example.myapplication
 
 import android.Manifest
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
+import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.SecondaryScrollableTabRow
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.RadioButton
+import com.example.myapplication.ui.theme.positive
+import com.example.myapplication.ui.theme.axisZ
+import com.example.myapplication.ui.theme.positiveContainer
+import com.example.myapplication.ui.theme.onPositive
+import com.example.myapplication.ui.theme.onPositiveContainer
+
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.le.ScanResult
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,10 +87,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -51,16 +108,16 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.foundation.Image
-import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -70,17 +127,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
@@ -88,6 +153,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Density
+import androidx.core.view.WindowCompat
 import androidx.core.content.ContextCompat
 import com.example.myapplication.ui.theme.MyApplicationTheme
 import com.espressif.provisioning.DeviceConnectionEvent
@@ -101,8 +168,6 @@ import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.security.KeyStore
 import java.time.LocalDateTime
@@ -119,15 +184,28 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-private val Ink = Color(0xFF102A3A)
-private val Muted = Color(0xFF547080)
-private val Cyan = Color(0xFF007F9F)
-private val Green = Color(0xFF087A4A)
-private val Amber = Color(0xFFA55B00)
-private val Red = Color(0xFFC3344F)
-private val Page = Color(0xFFEAF0F3)
-private val Grid = Color(0xFFD5E0E5)
+private val Ink: Color @Composable get() = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+private val Muted: Color @Composable get() = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+private val Accent: Color @Composable get() = androidx.compose.material3.MaterialTheme.colorScheme.primary
+private val Positive: Color @Composable get() = androidx.compose.material3.MaterialTheme.colorScheme.positive
+private val Warning: Color @Composable get() = androidx.compose.material3.MaterialTheme.colorScheme.tertiary
+private val Danger: Color @Composable get() = androidx.compose.material3.MaterialTheme.colorScheme.error
+private val Page: Color @Composable get() = androidx.compose.material3.MaterialTheme.colorScheme.background
+private val Grid: Color @Composable get() = androidx.compose.material3.MaterialTheme.colorScheme.outlineVariant
 private const val ESP_PROVISIONING_SERVICE_UUID = "1775244d-6b43-439b-877c-060f2d9bed07"
+
+private data class DashboardPreferences(
+    val theme: String = "System",
+    val deviceColors: Boolean = false,
+    val fontSize: String = "Medium",
+    val dashboardContainers: Boolean = true,
+    val monitorTabs: Boolean = true,
+    val reduceAnimations: Boolean = false,
+    val confirmCalibration: Boolean = true,
+    val rememberLastDevice: Boolean = true
+) {
+    val fontScale: Float get() = when (fontSize) { "Small" -> .90f; "Large" -> 1.15f; else -> 1f }
+}
 
 private data class ImuReading(
     val sequence: Long,
@@ -141,6 +219,9 @@ private data class CirFrame(val startIndex: Int, val magnitude: List<Double>)
 class MainActivity : ComponentActivity() {
     private lateinit var repository: DeviceRepository
     private val dashboard = mutableStateOf(DashboardSnapshot())
+    private val uiPreferences = mutableStateOf(DashboardPreferences())
+    private val csvFolder = mutableStateOf<Uri?>(null)
+    private var pendingCsvStartCount = 0
     private val createCsv = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri: Uri? ->
         if (uri == null) {
             repository.setStatus("CSV export cancelled")
@@ -149,8 +230,17 @@ class MainActivity : ComponentActivity() {
                 .onFailure { repository.setStatus("Could not create CSV file: ${it.message}") }
                 .getOrNull()
             if (output == null) repository.setStatus("Could not open the selected CSV file")
-            else repository.exportCsv(output) { }
+            else repository.exportCsv(output, pendingCsvStartCount) { }
         }
+    }
+    private val chooseCsvFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) runCatching {
+            contentResolver.takePersistableUriPermission(uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            csvFolder.value = uri
+            getSharedPreferences("dashboard_settings", MODE_PRIVATE).edit().putString("csv_folder", uri.toString()).apply()
+            repository.setStatus("CSV export folder saved")
+        }.onFailure { repository.setStatus("Could not use this folder: ${it.message}") }
     }
     private val localNetworkPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) repository.manualScan()
@@ -161,26 +251,102 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         repository = DeviceRepository(this) { dashboard.value = it }
         dashboard.value = repository.snapshot()
+        val settings = getSharedPreferences("dashboard_settings", MODE_PRIVATE)
+        uiPreferences.value = DashboardPreferences(
+            theme = settings.getString("theme", "System") ?: "System",
+            deviceColors = settings.getBoolean("device_colors", false),
+            fontSize = settings.getString("font_size", "Medium") ?: "Medium",
+            dashboardContainers = settings.getBoolean("dashboard_containers", true),
+            monitorTabs = settings.getBoolean("monitor_tabs", true),
+            reduceAnimations = settings.getBoolean("reduce_animations", false),
+            confirmCalibration = settings.getBoolean("confirm_calibration", true),
+            rememberLastDevice = settings.getBoolean("remember_device", true))
+        csvFolder.value = settings.getString("csv_folder", null)?.let(Uri::parse)
         requestLocalNetworkIfNeeded()
         setContent {
             val snapshot by remember { dashboard }
-            MyApplicationTheme {
-                var showSplash by remember { mutableStateOf(true) }
-                LaunchedEffect(Unit) {
-                    delay(1550)
-                    showSplash = false
+            val preferences by remember { uiPreferences }
+            val folder by remember { csvFolder }
+            val systemDark = isSystemInDarkTheme()
+            val darkTheme = when (preferences.theme) { "Dark" -> true; "Light" -> false; else -> systemDark }
+            DisposableEffect(darkTheme) {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
                 }
-                Crossfade(targetState = showSplash, animationSpec = tween(350), label = "startup") { splash ->
-                    if (splash) SenseSplash() else DashboardApp(snapshot, repository,
-                        onSaveCsv = {
-                            val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", Locale.US))
-                            val label = it.replace(Regex("[^A-Za-z0-9_-]"), "_").trim('_').ifBlank { "session" }
-                            createCsv.launch("UWB_${label}_$stamp.csv")
-                        },
-                        onScan = { if (requestLocalNetworkIfNeeded()) repository.manualScan() })
+                onDispose { }
+            }
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, density.fontScale * preferences.fontScale)) {
+                MyApplicationTheme(darkTheme, deviceColors = preferences.deviceColors) {
+                    var showSplash by remember { mutableStateOf(!preferences.reduceAnimations) }
+                    LaunchedEffect(preferences.reduceAnimations) {
+                        if (preferences.reduceAnimations) showSplash = false
+                        else if (showSplash) { delay(1550); showSplash = false }
+                    }
+                    Crossfade(targetState = showSplash,
+                        animationSpec = tween(if (preferences.reduceAnimations) 0 else 350), label = "startup") { splash ->
+                        if (splash) SenseSplash() else DashboardApp(snapshot, repository,
+                            preferences = preferences,
+                            storageFolder = folder,
+                            onPreferencesChanged = { changed ->
+                                uiPreferences.value = changed
+                                getSharedPreferences("dashboard_settings", MODE_PRIVATE).edit()
+                                    .putString("theme", changed.theme).putString("font_size", changed.fontSize)
+                                    .putBoolean("device_colors", changed.deviceColors)
+                                    .putBoolean("dashboard_containers", changed.dashboardContainers)
+                                    .putBoolean("monitor_tabs", changed.monitorTabs)
+                                    .putBoolean("reduce_animations", changed.reduceAnimations)
+                                    .putBoolean("confirm_calibration", changed.confirmCalibration)
+                                    .putBoolean("remember_device", changed.rememberLastDevice).apply()
+                            },
+                            onPickStorage = { chooseCsvFolder.launch(folder) },
+                            onResetStorage = {
+                                folder?.let { runCatching { contentResolver.releasePersistableUriPermission(it,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) } }
+                                csvFolder.value = null
+                                getSharedPreferences("dashboard_settings", MODE_PRIVATE).edit().remove("csv_folder").apply()
+                            },
+                            onOpenStorage = { openStorageFolder(folder) },
+                            onSaveCsv = ::requestCsvExport,
+                            onScan = { if (requestLocalNetworkIfNeeded()) repository.manualScan() })
+                    }
+                }
                 }
             }
         }
+
+    private fun requestCsvExport(label: String, startingAtRecord: Int) {
+        val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", Locale.US))
+        val cleanLabel = label.replace(Regex("[^A-Za-z0-9_-]"), "_").trim('_').ifBlank { "session" }
+        val filename = "UWB_${cleanLabel}_$stamp.csv"
+        pendingCsvStartCount = startingAtRecord
+        val folder = csvFolder.value
+        if (folder == null) {
+            createCsv.launch(filename)
+            return
+        }
+        val uri = runCatching {
+            val rootId = DocumentsContract.getTreeDocumentId(folder)
+            val root = DocumentsContract.buildDocumentUriUsingTree(folder, rootId)
+            DocumentsContract.createDocument(contentResolver, root, "text/csv", filename)
+                ?: error("The selected folder refused to create a CSV file")
+        }.getOrElse {
+            repository.setStatus("Could not create CSV in selected folder: ${it.message}")
+            return
+        }
+        val output = runCatching { contentResolver.openOutputStream(uri) }
+            .onFailure { repository.setStatus("Could not open CSV file: ${it.message}") }.getOrNull()
+        if (output == null) repository.setStatus("Selected folder returned no writable stream")
+        else repository.exportCsv(output, startingAtRecord) { }
+    }
+
+    private fun openStorageFolder(folder: Uri?) {
+        if (folder == null) { repository.setStatus("Choose a CSV folder first"); return }
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(folder, "vnd.android.document/directory")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        }.onFailure { repository.setStatus("No file manager can open this folder: ${it.message}") }
     }
 
     private fun requestLocalNetworkIfNeeded(): Boolean {
@@ -200,42 +366,85 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun SenseSplash() {
-    val scale = remember { Animatable(0.78f) }
-    val alpha = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        coroutineScope {
-            launch { scale.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy)) }
-            launch { alpha.animateTo(1f, tween(600)) }
+private fun NavigationGlyph(index: Int, selected: Boolean, reduceAnimations: Boolean) {
+    val scale by animateFloatAsState(if (selected) 1.08f else 1f,
+        animationSpec = tween(if (reduceAnimations) 0 else 180), label = "navigation-icon")
+    InstrumentIcon(listOf("monitor", "devices", "settings")[index], if (selected) Accent else Muted,
+        Modifier.size(24.dp).graphicsLayer { scaleX = scale; scaleY = scale })
+}
+
+@Composable
+private fun AppNavigation(selected: Int, rail: Boolean, reduceAnimations: Boolean, onSelect: (Int) -> Unit) {
+    val titles = listOf("Dashboard", "Devices", "Settings")
+    val colors = MaterialTheme.colorScheme
+    if (rail) {
+        NavigationRail(containerColor = colors.surfaceContainerLow) {
+            Text("SENSE", color = Accent, style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(vertical = 20.dp))
+            titles.forEachIndexed { index, title ->
+                NavigationRailItem(selected = selected == index, onClick = { onSelect(index) },
+                    icon = { NavigationGlyph(index, selected == index, reduceAnimations) },
+                    label = { Text(title, style = MaterialTheme.typography.labelMedium) },
+                    colors = NavigationRailItemDefaults.colors(indicatorColor = colors.primaryContainer,
+                        selectedIconColor = Accent, selectedTextColor = Accent))
+            }
         }
-    }
-    Box(Modifier.fillMaxSize().background(Page), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Image(painterResource(R.drawable.sense_logo), contentDescription = "Sense logo",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.width(240.dp).height(98.dp).graphicsLayer {
-                    scaleX = scale.value
-                    scaleY = scale.value
-                    this.alpha = alpha.value
-                })
-            Spacer(Modifier.height(14.dp))
-            Text("UWB LOCALIZATION", color = Ink, fontSize = 16.sp,
-                fontWeight = FontWeight.ExtraBold, letterSpacing = 1.5.sp)
-            Spacer(Modifier.height(20.dp))
-            CircularProgressIndicator(color = Cyan, strokeWidth = 2.dp,
-                modifier = Modifier.size(22.dp))
+    } else {
+        NavigationBar(containerColor = colors.surfaceContainerLow, tonalElevation = 0.dp) {
+            titles.forEachIndexed { index, title ->
+                NavigationBarItem(selected = selected == index, onClick = { onSelect(index) },
+                    icon = { NavigationGlyph(index, selected == index, reduceAnimations) },
+                    label = { Text(title, style = MaterialTheme.typography.labelMedium) },
+                    colors = NavigationBarItemDefaults.colors(indicatorColor = colors.primaryContainer,
+                        selectedIconColor = Accent, selectedTextColor = Accent))
+            }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, onSaveCsv: (String) -> Unit, onScan: () -> Unit) {
+private fun TabTransition(targetState: Int, reduceAnimations: Boolean, modifier: Modifier = Modifier,
+                          label: String, content: @Composable (Int) -> Unit) {
+    AnimatedContent(targetState = targetState, modifier = modifier, label = label,
+        transitionSpec = {
+            val duration = if (reduceAnimations) 0 else 240
+            val direction = if (targetState > initialState) 1 else -1
+            ((slideInHorizontally(tween(duration)) { direction*it/12 } + fadeIn(tween(duration))) togetherWith
+                (slideOutHorizontally(tween(duration)) { -direction*it/16 } + fadeOut(tween(duration*2/3))))
+                .using(SizeTransform(clip = true) { _, _ -> tween(duration) })
+        }) { visibleState -> content(visibleState) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+private fun DashboardApp(
+    snapshot: DashboardSnapshot,
+    repo: DeviceRepository,
+    preferences: DashboardPreferences,
+    storageFolder: Uri?,
+    onPreferencesChanged: (DashboardPreferences) -> Unit,
+    onPickStorage: () -> Unit,
+    onResetStorage: () -> Unit,
+    onOpenStorage: () -> Unit,
+    onSaveCsv: (String, Int) -> Unit,
+    onScan: () -> Unit
+) {
     var editing by remember { mutableStateOf<DeviceRecord?>(null) }
     var editorOpen by remember { mutableStateOf(false) }
     var configOpen by remember { mutableStateOf(false) }
+    var settingsOpen by remember { mutableStateOf(false) }
+    var monitorTab by remember { mutableStateOf(0) }
+    var settingsTab by remember { mutableStateOf(0) }
+    val monitorListState = rememberLazyListState()
+    val mapViewport = remember { MapViewport() }
+    val navigationFocus = LocalFocusManager.current
+    BackHandler(enabled = configOpen || settingsOpen) {
+        configOpen = false
+        settingsOpen = false
+    }
+    LaunchedEffect(monitorTab, preferences.monitorTabs) { monitorListState.scrollToItem(0) }
+    var calibrationConfirm by remember { mutableStateOf(false) }
     var wifiProvisionOpen by remember { mutableStateOf(false) }
-    var actionsExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val blePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         if (result.values.all { it }) wifiProvisionOpen = true
@@ -256,8 +465,13 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
     var cirError by remember { mutableStateOf("") }
     var cirLoading by remember { mutableStateOf(false) }
     var cirDeviceKey by remember { mutableStateOf("") }
-    var selectedKey by remember { mutableStateOf("") }
+    var selectedKey by remember {
+        mutableStateOf(if (preferences.rememberLastDevice)
+            context.getSharedPreferences("dashboard_settings", android.content.Context.MODE_PRIVATE)
+                .getString("selected_device", "").orEmpty() else "")
+    }
     var fitMapRequest by remember { mutableStateOf(0) }
+    var mapFullscreen by remember { mutableStateOf(false) }
     LaunchedEffect(configOpen) { if (configOpen) onScan() }
     val names = remember(snapshot.devices, snapshot.positions) {
         val result = mutableMapOf<String, String>()
@@ -281,8 +495,23 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
         }
     }.orEmpty()
     val sample = chosen?.let { snapshot.states[it.key]?.sample }
-    val tracking = snapshot.states.values.any { it.online && it.sample.optBoolean("streaming", true) }
+    val tracking = snapshot.states.values.any { it.online && it.sample.optBoolean("streaming", false) }
+    var clockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(snapshot.collecting) {
+        if (snapshot.collecting) while (isActive) { clockMs = System.currentTimeMillis(); delay(1000) }
+    }
+    LaunchedEffect(chosen?.key, preferences.rememberLastDevice) {
+        val prefs = context.getSharedPreferences("dashboard_settings", android.content.Context.MODE_PRIVATE)
+        if (preferences.rememberLastDevice) chosen?.key?.let { prefs.edit().putString("selected_device", it).apply() }
+        else prefs.edit().remove("selected_device").apply()
+    }
     val imuHistory = remember(chosen?.key) { mutableStateListOf<ImuReading>() }
+    val orientationTracker = remember(chosen?.key) { DeviceOrientation() }
+    var orientationEstimate by remember(chosen?.key) { mutableStateOf<OrientationEstimate?>(null) }
+    var showRawImu by remember(chosen?.key) { mutableStateOf(false) }
+    val orientationZero = remember(chosen?.key, orientationEstimate?.generation) {
+        mutableStateOf<OrientationQuaternion?>(null)
+    }
     val imuStamp = sample?.optLong("imu_timestamp_ms", sample.optLong("timestamp_ms", 0)) ?: 0L
     val imuSequence = sample?.optLong("imu_sequence", imuStamp) ?: imuStamp
     fun requestCir(deviceKey: String, ip: String) {
@@ -331,195 +560,297 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
             }
         }
     }
-    LaunchedEffect(chosen?.key, imuSequence) {
+    LaunchedEffect(chosen?.key, imuSequence, imuStamp) {
         if (sample?.optBoolean("imu_valid") == true) {
             val accel = sample.optJSONArray("accel")
             val gyro = sample.optJSONArray("gyro")
-            if (accel != null && accel.length() >= 3 && gyro != null && gyro.length() >= 3 &&
-                imuHistory.lastOrNull()?.sequence != imuSequence) {
-                imuHistory.add(ImuReading(
-                    imuSequence, imuStamp,
-                    accel.optDouble(0), accel.optDouble(1), accel.optDouble(2),
-                    gyro.optDouble(0), gyro.optDouble(1), gyro.optDouble(2)))
-                if (imuHistory.size > 120) imuHistory.removeAt(0)
-            }
+            if (accel != null && accel.length() >= 3 && gyro != null && gyro.length() >= 3) {
+                val a = DoubleArray(3) { accel.optDouble(it) }
+                val g = DoubleArray(3) { gyro.optDouble(it) }
+                orientationEstimate = orientationTracker.update(imuStamp, a, g)
+                if (a.all(Double::isFinite) && g.all(Double::isFinite) &&
+                    imuHistory.lastOrNull()?.sequence != imuSequence) {
+                    imuHistory.add(ImuReading(imuSequence, imuStamp, a[0], a[1], a[2], g[0], g[1], g[2]))
+                    if (imuHistory.size > 120) imuHistory.removeAt(0)
+                }
+            } else orientationEstimate = null
         }
     }
-    Scaffold(containerColor = Page) { padding ->
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item {
-                Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(22.dp)) {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("DASHBOARD", color = Ink, fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 15.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                                Text("${snapshot.states.values.count { it.online }} online \u00b7 ${snapshot.positions.size} tags",
-                                    color = Muted, fontSize = 11.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                            }
-                            TextButton(enabled = snapshot.collected > 0, onClick = {
-                                onSaveCsv(chosen?.let { names[it.key] }.orEmpty().ifBlank { "session" })
-                            }) { Text("Export CSV", fontSize = 11.sp, maxLines = 1) }
-                            Box {
-                                Surface(color = Color(0xFFE7F4F8), shape = CircleShape,
-                                    modifier = Modifier.size(42.dp).clickable { actionsExpanded = true }
-                                        .semantics { contentDescription = "Open dashboard actions" }) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Text("\u22ee", color = Cyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+    val minimumActionWidth = (96 * LocalDensity.current.fontScale.coerceAtLeast(1f)).dp
+    val activeScreen = if (configOpen) 1 else if (settingsOpen) 2 else 0
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val useRail = maxWidth >= 600.dp
+    val selectDestination: (Int) -> Unit = { index ->
+        navigationFocus.clearFocus()
+        configOpen = index == 1
+        settingsOpen = index == 2
+    }
+    Scaffold(containerColor = Page, bottomBar = {
+        if (!useRail) AppNavigation(activeScreen, false, preferences.reduceAnimations, selectDestination)
+    }) { padding ->
+        Row(Modifier.fillMaxSize()) {
+            if (useRail) AppNavigation(activeScreen, true, preferences.reduceAnimations, selectDestination)
+        TabTransition(targetState = activeScreen, modifier = Modifier.weight(1f).fillMaxHeight().padding(padding).consumeWindowInsets(padding),
+            reduceAnimations = preferences.reduceAnimations, label = "main-navigation") { screen ->
+            when (screen) {
+                1 -> DevicesPage(snapshot, names, repo,
+                    onScan = onScan,
+                    onAdd = { editing = null; editorOpen = true },
+                    onEdit = { editing = it; editorOpen = true },
+                    onClear = { clearConfirm = true }, onWifiSetup = ::requestWifiProvisioning)
+                2 -> SettingsPage(
+                    page = settingsTab, onPageSelected = { navigationFocus.clearFocus(); settingsTab = it },
+                    snapshot = snapshot, names = names, chosen = chosen, chosenIp = chosenIp, sample = sample, cirData = cirData,
+                    preferences = preferences, storageFolder = storageFolder, onPreferencesChanged = onPreferencesChanged,
+                    onPickStorage = onPickStorage, onResetStorage = onResetStorage, onOpenStorage = onOpenStorage,
+                    onRefresh = repo::refreshNow,
+                    onDeviceSelected = { selectedKey = it },
+                    onApplyDevice = { device, body, completed ->
+                        repo.postControl(chosenIp, body, device.mac.ifBlank { device.ip }) { response ->
+                            if (runCatching { JSONObject(response).optBoolean("ok") }.getOrDefault(false)) repo.upsert(device)
+                            completed(response)
+                        }
+                    })
+                else -> {
+                    LazyColumn(state = monitorListState, modifier = Modifier.fillMaxSize().wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = 840.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        item {
+                            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Dashboard", color = Ink, fontWeight = FontWeight.Medium,
+                                            fontSize = 28.sp, lineHeight = 36.sp, letterSpacing = 0.sp,
+                                            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                                        Text("${snapshot.states.values.count { it.online }} online \u00b7 ${snapshot.positions.size} located tags",
+                                            color = Muted, fontSize = 14.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    val batteryPercent = sample?.optDouble("battery_percent", Double.NaN) ?: Double.NaN
+                                    val batteryAvailable = chosen != null && sample?.optBoolean("battery_valid") == true &&
+                                        snapshot.states[chosen.key]?.online == true && batteryPercent.isFinite()
+                                    val batteryTone by animateColorAsState(
+                                        if (batteryAvailable) batteryLevelColor(batteryPercent, MaterialTheme.colorScheme.surface.luminance() < .5f) else Muted,
+                                        animationSpec = tween(if (preferences.reduceAnimations) 0 else 300), label = "battery-color")
+                                    BatteryIcon(
+                                        if (batteryAvailable) "${batteryPercent.toInt()}%" else "--",
+                                        if (batteryAvailable) batteryPercent else 0.0,
+                                        batteryTone,
+                                        Modifier.size(width = 76.dp, height = 28.dp)
+                                            .semantics { contentDescription = if (batteryAvailable) "Battery ${batteryPercent.toInt()} percent" else "Battery unavailable" },
+                                        reduceAnimations = preferences.reduceAnimations
+                                    )
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                DevicePickerContent(snapshot.devices, chosen, names, snapshot.states,
+                                    onSelect = { selectedKey = it })
+                                Spacer(Modifier.height(8.dp))
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    DashboardActionButton(
+                                        label = if (tracking) "Pause" else "Start", icon = if (tracking) "pause" else "start",
+                                        active = tracking, loading = snapshot.streamingPending,
+                                        enabled = !snapshot.streamingPending && snapshot.devices.isNotEmpty(),
+                                        modifier = Modifier.widthIn(min = minimumActionWidth).weight(1f)
+                                    ) { repo.setStreaming(!tracking) }
+                                    DashboardActionButton(
+                                        label = if (snapshot.calibrationProgress.isBlank()) "Calibrate" else "Cancel",
+                                        icon = if (snapshot.calibrationProgress.isBlank()) "calibrate" else "close",
+                                        active = snapshot.calibrationProgress.isNotBlank(), accent = Warning,
+                                        enabled = snapshot.calibrationProgress.isNotBlank() || chosen != null,
+                                        modifier = Modifier.widthIn(min = minimumActionWidth).weight(1f)
+                                    ) {
+                                        if (snapshot.calibrationProgress.isNotBlank()) repo.startOrCancelCalibration()
+                                        else if (preferences.confirmCalibration && tracking) calibrationConfirm = true
+                                        else repo.startOrCancelCalibration()?.let(repo::setStatus)
+                                    }
+                                    DashboardActionButton(
+                                        label = if (snapshot.collecting) "Stop CSV" else "Record CSV", icon = if (snapshot.collecting) "stop" else "record",
+                                        active = snapshot.collecting, recording = snapshot.collecting, accent = Positive,
+                                        enabled = snapshot.collecting ||
+                                            (snapshot.devices.isNotEmpty() && !snapshot.status.startsWith("Exporting")),
+                                        modifier = Modifier.widthIn(min = minimumActionWidth).weight(1f)
+                                    ) {
+                                        if (snapshot.collecting) {
+                                            repo.setCollecting(false)
+                                            if (snapshot.collected > snapshot.recordingStartCount)
+                                                onSaveCsv(chosen?.let { names[it.key] }.orEmpty().ifBlank { "session" }, snapshot.recordingStartCount)
+                                            else repo.setStatus("Recording stopped: no new device records were received")
+                                        } else repo.setCollecting(true)
                                     }
                                 }
-                                DropdownMenu(expanded = actionsExpanded,
-                                    onDismissRequest = { actionsExpanded = false }) {
-                                    DropdownMenuItem(text = { Text("Devices") }, onClick = {
-                                        actionsExpanded = false
-                                        configOpen = true
-                                    })
-                                    DropdownMenuItem(text = {
-                                        Text(if (snapshot.calibrationProgress.isBlank()) "Calibrate" else "Cancel calibration")
-                                    }, onClick = {
-                                        actionsExpanded = false
-                                        repo.startOrCancelCalibration()?.let(repo::setStatus)
-                                    })
-                                    DropdownMenuItem(text = {
-                                        Text(if (snapshot.collecting) "Stop CSV recording" else "Start CSV recording")
-                                    }, onClick = {
-                                        actionsExpanded = false
-                                        repo.setCollecting(!snapshot.collecting)
-                                    })
-                                    DropdownMenuItem(enabled = snapshot.collected > 0,
-                                        text = { Text("Export CSV (${snapshot.collected} records)") }, onClick = {
-                                            actionsExpanded = false
-                                            if (snapshot.collecting) repo.setCollecting(false)
-                                            onSaveCsv(chosen?.let { names[it.key] }.orEmpty().ifBlank { "session" })
-                                    })
-                                    DropdownMenuItem(text = {
-                                        Text(if (tracking) "Pause tracking" else "Start tracking")
-                                    }, onClick = {
-                                        actionsExpanded = false
-                                        repo.setStreaming(!tracking)
-                                    })
-                                    DropdownMenuItem(text = { Text("Configure Wi-Fi via Bluetooth") }, onClick = {
-                                        actionsExpanded = false
-                                        requestWifiProvisioning()
-                                    })
+                                if (snapshot.collecting) {
+                                    val elapsed = ((clockMs - (snapshot.recordingStartedAtMs ?: clockMs)).coerceAtLeast(0) / 1000)
+                                    Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Box(Modifier.size(8.dp).clip(CircleShape).background(Danger))
+                                        Text("Recording  ${elapsed / 60}:${(elapsed % 60).toString().padStart(2, '0')}  ·  ${snapshot.collected - snapshot.recordingStartCount} records",
+                                            color = Danger, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                                            modifier = Modifier.padding(start = 8.dp))
+                                    }
+                                }
+                            }
+                            FeedbackMessage(snapshot.status, busy = snapshot.streamingPending || snapshot.status.startsWith("Exporting"))
+                            if (snapshot.calibrationProgress.isNotBlank())
+                                FeedbackMessage("Calibration \u00b7 ${snapshot.calibrationProgress}", busy = true)
+                        }
+                        if (preferences.monitorTabs) stickyHeader(key = "monitor-tabs") {
+                            SecondaryTabRow(selectedTabIndex = monitorTab, containerColor = Page) {
+                                listOf("Map", "Motion", "CIR", "Battery").forEachIndexed { index, title ->
+                                    Tab(selected = monitorTab == index, onClick = { monitorTab = index },
+                                        selectedContentColor = Accent, unselectedContentColor = Muted,
+                                        text = { Text(title, fontSize = 14.sp) })
                                 }
                             }
                         }
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(start = 12.dp, top = 5.dp)) {
-                    if (snapshot.status.startsWith("Exporting")) {
-                        CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Cyan)
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    Text(snapshot.status, color = Muted, fontSize = 12.sp, maxLines = 2,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                }
-                if (snapshot.calibrationProgress.isNotBlank()) Text(snapshot.calibrationProgress, color = Amber, fontSize = 11.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 12.dp))
-            }
-            item {
-                DashboardGroup {
-                    GroupedSection("DEVICE SELECTION") {
-                        DevicePickerContent(snapshot.devices, chosen, names, snapshot.states,
-                            onSelect = { selectedKey = it })
-                    }
-                    GroupDivider()
-                    GroupedSection("BATTERY STATUS") {
-                        when {
-                            chosen == null -> EmptyHint("Add or select a device to view battery telemetry.")
-                            sample == null -> EmptyHint("Waiting for battery telemetry from ${names[chosen.key]}.")
-                            snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline.")
-                            !sample.optBoolean("battery_valid") -> EmptyHint("Battery reading is unavailable. Check the firmware battery monitor and ADC wiring.")
-                            else -> MetricRow("VOLTAGE", String.format(Locale.US, "%.2f V", sample.optDouble("battery_voltage")),
-                                "CHARGE", String.format(Locale.US, "%.0f%%", sample.optDouble("battery_percent")))
-                        }
-                    }
-                }
-            }
-            item {
-                DashboardGroup {
-                    GroupedSection("2D LOCALIZATION MAP", headerAction = {
-                        TextButton(onClick = { fitMapRequest++ },
-                            modifier = Modifier.size(30.dp).semantics { contentDescription = "Fit all anchors and tags" },
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
-                            Text("FIT", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }) {
-                        if (snapshot.devices.none { it.role == "anchor" }) {
-                            EmptyHint("Add three or more anchors in Configuration to start mapping.")
-                        } else {
-                            LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, fitMapRequest,
-                                Modifier.fillMaxWidth().height(270.dp).clip(RoundedCornerShape(12.dp)))
-                            MapLegend()
-                        }
-                        snapshot.positions.entries.firstOrNull()?.let { (tag, p) ->
-                            Text("${names[tag] ?: "Tag"}   X ${String.format(Locale.US, "%+.2f", p.x)} m   Y ${String.format(Locale.US, "%+.2f", p.y)} m   RMS ${p.error.fmt()} m",
-                                color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
-                        }
-                    }
-                    GroupDivider()
-                    GroupedSection("IMU DATA - ${chosen?.let { names[it.key] } ?: "NO DEVICE"}") {
-                        when {
-                            chosen == null -> EmptyHint("Add or select a device to view IMU telemetry.")
-                            sample == null -> EmptyHint("Waiting for telemetry from ${names[chosen.key]}. Check that it is online.")
-                            snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline. Reconnect it to Wi-Fi to receive IMU telemetry.")
-                            !sample.optBoolean("imu_valid") -> EmptyHint(
-                                if (!sample.optBoolean("imu_enabled", true))
-                                    "IMU is disabled in this device's firmware. Enable the MPU6050 and flash the device."
-                                else "Waiting for a valid MPU6050 sample. Check sensor wiring and the device boot log.")
-                            else -> {
-                                MetricRow("ACCEL - g", vector(sample, "accel"), "GYRO - deg/s", vector(sample, "gyro"))
-                                ImuChart("ACCELEROMETER - g", imuHistory, acceleration = true,
-                                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
-                                ImuChart("GYROSCOPE - deg/s", imuHistory, acceleration = false,
-                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                            }
-                        }
-                    }
-                    GroupDivider()
-                    GroupedSection("CIR DATA MAP") {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(chosen?.let { "${names[it.key] ?: "Device"} | ${it.mac.ifBlank { it.ip }}" } ?: "Select a device",
-                                color = Muted, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                            TextButton(onClick = {
-                                if (chosen == null || chosenIp.isBlank()) cirError = "This device has no IP address"
-                                else {
-                                    cirError = "Loading CIR..."
-                                    cirDeviceKey = chosen.key
-                                    requestCir(chosen.key, chosenIp)
+                        item {
+                            DashboardGroup(preferences.dashboardContainers) {
+                                TabTransition(targetState = if (preferences.monitorTabs) monitorTab else -1,
+                                    modifier = Modifier.fillMaxWidth(), reduceAnimations = preferences.reduceAnimations,
+                                    label = "dashboard-view") { activeTab ->
+                                    Column {
+                                        val sections = if (activeTab >= 0) listOf(activeTab) else (0..3).toList()
+                                        sections.forEach { section ->
+                                            if (!preferences.monitorTabs && section > 0) GroupDivider()
+                                            when (section) {
+                                                0 -> GroupedSection("Localization map", headerAction = {
+                                                    Row {
+                                                        IconButton(shape = MaterialTheme.shapes.medium, onClick = { fitMapRequest++ }, modifier = Modifier.semantics {
+                                                            contentDescription = "Fit all anchors and tags"
+                                                        }) { InstrumentIcon("fit", Muted) }
+                                                        IconButton(shape = MaterialTheme.shapes.medium, onClick = { mapFullscreen = true }, modifier = Modifier.semantics {
+                                                            contentDescription = "Open fullscreen localization map"
+                                                        }) { InstrumentIcon("fullscreen", Muted) }
+                                                    }
+                                                }) {
+                                                    if (snapshot.devices.none { it.role == "anchor" }) {
+                                                        EmptyHint("Add at least three anchors in Devices and enter their measured coordinates to locate a tag.")
+                                                    } else {
+                                                        LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, fitMapRequest,
+                                                            Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(20.dp)), viewport = mapViewport)
+                                                        MapLegend()
+                                                    }
+                                                    snapshot.positions.entries.firstOrNull()?.let { (tag, p) ->
+                                                        Text("${names[tag] ?: "Tag"}   X ${String.format(Locale.US, "%+.2f", p.x)} m   Y ${String.format(Locale.US, "%+.2f", p.y)} m   RMS ${p.error.fmt()} m",
+                                                            color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                                                    }
+                                                }
+                                                1 -> GroupedSection("IMU \u00b7 ${chosen?.let { names[it.key] } ?: "No device"}") {
+                                                    when {
+                                                        chosen == null -> EmptyHint("Add or select a device to view IMU telemetry.")
+                                                        sample == null -> EmptyHint("Waiting for telemetry from ${names[chosen.key]}. Check that it is online.")
+                                                        snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline. Reconnect it to Wi-Fi to receive IMU telemetry.")
+                                                        !sample.optBoolean("imu_valid") -> EmptyHint(
+                                                            if (!sample.optBoolean("imu_enabled", true))
+                                                                "IMU is disabled in this device's firmware. Enable the MPU6050 and flash the device."
+                                                            else "Waiting for a valid MPU6050 sample. Check sensor wiring and the device boot log.")
+                                                        else -> {
+                                                            OrientationView(orientationEstimate, orientationZero)
+                                                            TextButton(onClick = { showRawImu = !showRawImu }) {
+                                                                Text(if (showRawImu) "Hide raw IMU readings" else "Show raw IMU readings")
+                                                            }
+                                                            if (showRawImu) ImuReadings(sample)
+                                                            ImuChart("Accelerometer \u00b7 g", imuHistory, acceleration = true,
+                                                                modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                                                            ImuChart("Gyroscope \u00b7 deg/s", imuHistory, acceleration = false,
+                                                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                                                        }
+                                                    }
+                                                }
+                                                2 -> GroupedSection("Channel impulse response") {
+                                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                                        Text(chosen?.let { "${names[it.key] ?: "Device"} | ${it.mac.ifBlank { it.ip }}" } ?: "Select a device",
+                                                            color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                                                        TextButton(enabled = chosen != null && chosenIp.isNotBlank(), onClick = {
+                                                            if (chosen == null || chosenIp.isBlank()) cirError = "This device has no IP address"
+                                                            else if (!cirLoading) {
+                                                                cirError = "Loading CIR..."
+                                                                cirDeviceKey = chosen.key
+                                                                requestCir(chosen.key, chosenIp)
+                                                            }
+                                                        }) { Text("Refresh") }
+                                                    }
+                                                    val activeCir = cirData.takeIf { cirDeviceKey == chosen?.key }
+                                                    if (activeCir?.optBoolean("valid") == true) {
+                                                        if (cirError.isNotBlank() && cirError != "Loading CIR...") FeedbackMessage(cirError)
+                                                        if (chosen != null && snapshot.states[chosen.key]?.online != true)
+                                                            Text("Device offline - showing the last cached CIR capture", color = Warning, fontSize = 14.sp)
+                                                        CirPlot(activeCir, cirHistory, Modifier.fillMaxWidth().height(260.dp))
+                                                        Text("${activeCir.optInt("sample_count")} samples | seq ${activeCir.optLong("sequence")} | age ${activeCir.optLong("age_ms")} ms",
+                                                            color = Muted, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
+                                                    } else EmptyHint(cirError.ifBlank {
+                                                        when {
+                                                            activeCir?.optBoolean("enabled") == false -> "CIR is disabled in this device's firmware."
+                                                            activeCir != null -> "CIR is enabled; waiting for a UWB packet from another device."
+                                                            else -> "Waiting for automatic CIR updates from the selected device."
+                                                        }
+                                                    })
+                                                }
+                                                3 -> GroupedSection("Battery") {
+                                                    when {
+                                                        chosen == null -> BatteryInfoState("Select a device to view battery telemetry.")
+                                                        sample == null -> BatteryInfoState("Waiting for ${names[chosen.key]} battery telemetry.")
+                                                        snapshot.states[chosen.key]?.online != true -> BatteryInfoState("${names[chosen.key]} is offline.")
+                                                        !sample.optBoolean("battery_valid") -> BatteryInfoState(
+                                                            "Battery reading unavailable. Check the firmware battery monitor and ADC wiring.", warning = true)
+                                                        !sample.optDouble("battery_percent", Double.NaN).isFinite() ||
+                                                            !sample.optDouble("battery_voltage", Double.NaN).isFinite() -> BatteryInfoState(
+                                                            "The device sent an invalid battery value.", warning = true)
+                                                        else -> BatteryTelemetryCard(sample.optDouble("battery_percent").coerceIn(0.0, 100.0),
+                                                            sample.optDouble("battery_voltage"), preferences.reduceAnimations)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                            }) { Text("Refresh") }
-                        }
-                        val activeCir = cirData.takeIf { cirDeviceKey == chosen?.key }
-                        if (activeCir?.optBoolean("valid") == true) {
-                            CirPlot(activeCir, cirHistory, Modifier.fillMaxWidth().height(260.dp))
-                            Text("${activeCir.optInt("sample_count")} samples | seq ${activeCir.optLong("sequence")} | age ${activeCir.optLong("age_ms")} ms",
-                                color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
-                        } else EmptyHint(cirError.ifBlank {
-                            when {
-                                activeCir?.optBoolean("enabled") == false -> "CIR is disabled in this device's firmware."
-                                activeCir != null -> "CIR is enabled; waiting for a UWB packet from another device."
-                                else -> "Waiting for automatic CIR updates from the selected device."
                             }
-                        })
+                        }
+                        item {
+                            Row(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${snapshot.devices.size} configured · ${snapshot.discovered.size} discovered · ${snapshot.collected} stored records",
+                                    color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                                TextButton(enabled = snapshot.collected > 0 && !snapshot.status.startsWith("Exporting"), onClick = {
+                                    onSaveCsv(chosen?.let { names[it.key] }.orEmpty().ifBlank { "session" }, 0)
+                                }) { Text("Export all", fontSize = 14.sp) }
+                            }
+                        }
                     }
                 }
             }
-            item { Text("${snapshot.devices.size} configured devices · ${snapshot.discovered.size} discovered", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(bottom = 16.dp)) }
         }
     }
-    if (configOpen) ConfigurationDialog(snapshot, names, repo,
-        onScan = onScan,
-        onAdd = { editing = null; configOpen = false; editorOpen = true },
-        onEdit = { editing = it; configOpen = false; editorOpen = true },
-        onClear = { clearConfirm = true },
-        onWifiProvision = ::requestWifiProvisioning,
-        onDismiss = { configOpen = false })
+    }
+    }
+    if (mapFullscreen) Dialog(onDismissRequest = { mapFullscreen = false },
+        properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = Page) {
+            Column(Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Localization map", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    IconButton(shape = MaterialTheme.shapes.medium, onClick = { fitMapRequest++ }, modifier = Modifier.semantics {
+                        contentDescription = "Fit all anchors and tags"
+                    }) { InstrumentIcon("fit", Muted) }
+                    TextButton(onClick = { mapFullscreen = false }) { Text("Done") }
+                }
+                if (snapshot.devices.none { it.role == "anchor" }) {
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        EmptyHint("Add at least three anchors with measured coordinates in Devices to locate a tag.")
+                    }
+                } else LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, fitMapRequest,
+                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)))
+                MapLegend()
+                Text("Pinch to zoom \u00b7 Drag to pan \u00b7 Double tap to fit", color = Muted, fontSize = 12.sp,
+                    modifier = Modifier.padding(vertical = 8.dp))
+            }
+        }
+    }
     if (wifiProvisionOpen) WifiProvisioningDialog(onDismiss = { wifiProvisionOpen = false })
+    if (calibrationConfirm) AlertDialog(onDismissRequest = { calibrationConfirm = false },
+        title = { Text("Calibrate while tracking?") },
+        text = { Text("Antenna delay calibration uses live ranges and may interrupt normal tracking. Keep the tag still during the calibration.") },
+        confirmButton = { TextButton(onClick = {
+            calibrationConfirm = false
+            repo.startOrCancelCalibration()?.let(repo::setStatus)
+        }) { Text("Start calibration") } },
+        dismissButton = { TextButton(onClick = { calibrationConfirm = false }) { Text("Cancel") } })
     if (editorOpen) DeviceEditorDialog(editing,
         initialSecurity = LastWifiCredentialStore.loadDeviceSecurity(context,
             editing?.let { it.mac.ifBlank { it.ip } }.orEmpty()),
@@ -536,30 +867,537 @@ private fun DashboardApp(snapshot: DashboardSnapshot, repo: DeviceRepository, on
     })
     if (clearConfirm) AlertDialog(onDismissRequest = { clearConfirm = false }, title = { Text("Clear configured devices?") },
         text = { Text("This removes the saved device map and localization configuration.") },
-        confirmButton = { TextButton(onClick = { repo.clear(); clearConfirm = false }) { Text("Clear", color = Red) } },
+        confirmButton = { TextButton(onClick = { repo.clear(); clearConfirm = false }) { Text("Clear", color = Danger) } },
         dismissButton = { TextButton(onClick = { clearConfirm = false }) { Text("Cancel") } })
+}
+
+@Composable
+private fun DashboardActionButton(
+    label: String, icon: String, enabled: Boolean, modifier: Modifier = Modifier,
+    active: Boolean = false, loading: Boolean = false, recording: Boolean = false, accent: Color? = null,
+    onClick: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    val filled = accent == null || active || recording
+    val tone = if (recording) Danger else accent ?: Accent
+    val foreground = when {
+        !enabled -> Muted
+        !filled && accent == Positive -> colors.onPositiveContainer
+        !filled && accent == Warning -> colors.onTertiaryContainer
+        tone == Danger -> colors.onError
+        tone == Positive -> colors.onPositive
+        tone == Warning -> colors.onTertiary
+        else -> colors.onPrimary
+    }
+    val background = when {
+        filled -> tone
+        accent == Positive -> colors.positiveContainer
+        else -> colors.tertiaryContainer
+    }
+    Button(onClick = onClick, enabled = enabled, modifier = modifier.heightIn(min = 64.dp),
+        shape = MaterialTheme.shapes.medium,
+        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = background, contentColor = foreground,
+            disabledContainerColor = colors.surfaceVariant, disabledContentColor = Muted),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 12.dp)) {
+        if (loading) CircularProgressIndicator(Modifier.size(20.dp), color = foreground, strokeWidth = 2.dp)
+        else InstrumentIcon(icon, foreground, Modifier.size(20.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f, fill = false),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+    }
+}
+
+@Composable
+private fun FeedbackMessage(message: String, busy: Boolean = false) {
+    if (message.isBlank()) return
+    var expanded by remember { mutableStateOf(false) }
+    val failure = message.contains("failed", true) || message.contains("could not", true) ||
+        message.contains("permission", true) || message.contains("mismatch", true)
+    val summary = when {
+        message.startsWith("Scan failed:") -> "Network scan failed"
+        message.startsWith("Scan complete \u00b7 0 found") -> "No devices found on this network"
+        message.startsWith("CIR request failed:") -> "Could not read CIR from this device"
+        message.startsWith("Control failed:") -> "Device control failed"
+        message.startsWith("CSV export failed:") -> "CSV export failed"
+        else -> message
+    }
+    val hasDetails = summary != message || message.length > 80
+    val colors = MaterialTheme.colorScheme
+    Surface(color = if (failure) colors.errorContainer else if (busy) colors.primaryContainer else colors.surfaceContainerLow,
+        shape = MaterialTheme.shapes.small) {
+        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (busy) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Accent)
+                    Spacer(Modifier.width(8.dp))
+                }
+                if (!busy) {
+                    InstrumentIcon(if (failure) "error" else "info", if (failure) colors.onErrorContainer else Muted, Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(summary, color = if (failure) colors.onErrorContainer else if (busy) colors.onPrimaryContainer else Muted, fontSize = 14.sp,
+                    maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite })
+                if (hasDetails) TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "Less" else "Details")
+                }
+            }
+            if (expanded && summary != message) Text(message, color = if (failure) colors.onErrorContainer else Muted,
+                fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun ImuReadings(sample: JSONObject) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth()) {
+            Text("Axis", color = Muted, fontSize = 14.sp, modifier = Modifier.width(40.dp))
+            Text("Accel \u00b7 g", color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+            Text("Gyro \u00b7 deg/s", color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+        }
+        listOf("X", "Y", "Z").forEachIndexed { index, axis ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Text(axis, color = Ink, fontSize = 14.sp, modifier = Modifier.width(40.dp))
+                listOf("accel", "gyro").forEach { field ->
+                    val value = sample.optJSONArray(field)?.optDouble(index, Double.NaN) ?: Double.NaN
+                    Text(if (value.isFinite()) String.format(Locale.US, "%.2f", value) else "--",
+                        color = Ink, fontSize = 14.sp, fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsPage(
+    page: Int,
+    onPageSelected: (Int) -> Unit,
+    snapshot: DashboardSnapshot,
+    names: Map<String, String>,
+    chosen: DeviceRecord?,
+    chosenIp: String,
+    sample: JSONObject?,
+    cirData: JSONObject?,
+    preferences: DashboardPreferences,
+    storageFolder: Uri?,
+    onPreferencesChanged: (DashboardPreferences) -> Unit,
+    onPickStorage: () -> Unit,
+    onResetStorage: () -> Unit,
+    onOpenStorage: () -> Unit,
+    onRefresh: () -> Unit,
+    onDeviceSelected: (String) -> Unit,
+    onApplyDevice: (DeviceRecord, JSONObject, (String) -> Unit) -> Unit
+) {
+    val context = LocalContext.current
+    val folderPath = remember(storageFolder) { storageFolderPath(context, storageFolder) }
+    Surface(Modifier.fillMaxSize(),
+        color = androidx.compose.material3.MaterialTheme.colorScheme.surface) {
+        Column {
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Settings", color = Ink, style = MaterialTheme.typography.headlineMedium)
+                    Text("Make the app work your way", color = Muted, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            SecondaryScrollableTabRow(selectedTabIndex = page, edgePadding = 0.dp,
+                containerColor = MaterialTheme.colorScheme.surface) {
+                listOf("Appearance", "Files", "About", "Device").forEachIndexed { index, title ->
+                    Tab(selected = page == index, onClick = { onPageSelected(index) },
+                        selectedContentColor = Accent, unselectedContentColor = Muted, text = {
+                        Text(title, maxLines = 1, softWrap = false, fontSize = 14.sp)
+                    })
+                }
+            }
+            TabTransition(targetState = page, modifier = Modifier.weight(1f),
+                reduceAnimations = preferences.reduceAnimations, label = "settings-page") { visiblePage ->
+                Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    when (visiblePage) {
+                        0 -> PreferencesPage(preferences, onPreferencesChanged)
+                        1 -> StoragePage(storageFolder, folderPath,
+                            onPickStorage, onResetStorage, onOpenStorage)
+                        2 -> AboutPage(chosen)
+                        else -> DevicePropertiesPage(snapshot, names, chosen, chosenIp, sample, cirData, onRefresh,
+                            onApplyDevice, onDeviceSelected)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PreferencesPage(value: DashboardPreferences, onChange: (DashboardPreferences) -> Unit) {
+    SettingsHeading("Appearance", "Changes are saved automatically.")
+    SettingsGroup {
+        Text("Theme", color = Ink, style = MaterialTheme.typography.titleSmall)
+        PreferenceChoices(listOf("Light", "Dark", "System"), value.theme) { onChange(value.copy(theme = it)) }
+        SettingsSwitch("Use device colours", if (Build.VERSION.SDK_INT >= 31) "Match the app to your wallpaper palette" else "Requires Android 12 or later",
+            value.deviceColors, enabled = Build.VERSION.SDK_INT >= 31) { onChange(value.copy(deviceColors = it)) }
+    }
+    SettingsGroup {
+        Text("Text size", color = Ink, style = MaterialTheme.typography.titleSmall)
+        PreferenceChoices(listOf("Small", "Medium", "Large"), value.fontSize) { onChange(value.copy(fontSize = it)) }
+    }
+    SettingsGroup {
+        Text("Dashboard view", color = Ink, style = MaterialTheme.typography.titleSmall)
+        Text("Use tabs or see all readings on one scrolling page.", color = Muted, fontSize = 14.sp)
+        PreferenceChoices(listOf("Tabs", "Scrolling"), if (value.monitorTabs) "Tabs" else "Scrolling",
+            preview = { MonitorViewPreview(tabs = it == "Tabs") }) {
+            onChange(value.copy(monitorTabs = it == "Tabs"))
+        }
+    }
+    SettingsGroup {
+        Text("Dashboard layout", color = Ink, style = MaterialTheme.typography.titleSmall)
+        Text("Put readings in cards or directly on the page.", color = Muted, fontSize = 14.sp)
+        PreferenceChoices(listOf("Containers", "No containers"), if (value.dashboardContainers) "Containers" else "No containers",
+            preview = { ContainerPreview(withContainers = it == "Containers") }) {
+            onChange(value.copy(dashboardContainers = it == "Containers"))
+        }
+    }
+    SettingsGroup {
+        Text("Behaviour", color = Ink, style = MaterialTheme.typography.titleSmall)
+        SettingsSwitch("Reduce animations", "Skip the animated startup screen and transitions.", value.reduceAnimations) {
+            onChange(value.copy(reduceAnimations = it))
+        }
+        SettingsSwitch("Confirm calibration", "Ask before calibrating during live tracking.", value.confirmCalibration) {
+            onChange(value.copy(confirmCalibration = it))
+        }
+        SettingsSwitch("Remember device", "Select the same device when you return.", value.rememberLastDevice) {
+            onChange(value.copy(rememberLastDevice = it))
+        }
+    }
+    TextButton(onClick = { onChange(DashboardPreferences()) }) { InstrumentIcon("reset", LocalContentColor.current, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Reset preferences") }
+}
+
+@Composable
+private fun ContainerPreview(withContainers: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    Canvas(Modifier.fillMaxWidth().height(56.dp).clip(MaterialTheme.shapes.small).background(Page)) {
+        val inset = 6.dp.toPx()
+        if (withContainers) drawRoundRect(colors.surface,
+            topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
+            size = androidx.compose.ui.geometry.Size(size.width-inset*2, size.height-inset*2),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()))
+        listOf(colors.primary, colors.secondary, colors.tertiary).forEachIndexed { index, tone ->
+            val y = (15 + index*13).dp.toPx()
+            drawCircle(tone, 2.dp.toPx(), androidx.compose.ui.geometry.Offset(14.dp.toPx(), y))
+            drawLine(tone, androidx.compose.ui.geometry.Offset(22.dp.toPx(), y),
+                androidx.compose.ui.geometry.Offset(size.width*.65f, y), 2.dp.toPx())
+            drawLine(colors.outlineVariant, androidx.compose.ui.geometry.Offset(size.width*.75f, y),
+                androidx.compose.ui.geometry.Offset(size.width-14.dp.toPx(), y), 2.dp.toPx())
+        }
+    }
+}
+
+@Composable
+private fun MonitorViewPreview(tabs: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    Canvas(Modifier.fillMaxWidth().height(56.dp).clip(MaterialTheme.shapes.small).background(Page)) {
+        val inset = 4.dp.toPx()
+        if (tabs) {
+            val width = (size.width-inset*5)/4
+            repeat(4) { index ->
+                drawRoundRect(if (index == 0) colors.primaryContainer else colors.surfaceVariant,
+                    topLeft = androidx.compose.ui.geometry.Offset(inset+index*(width+inset), inset),
+                    size = androidx.compose.ui.geometry.Size(width, 9.dp.toPx()),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+            }
+            drawLine(colors.primary, androidx.compose.ui.geometry.Offset(inset, 13.dp.toPx()),
+                androidx.compose.ui.geometry.Offset(inset+width, 13.dp.toPx()), 2.dp.toPx())
+            drawRoundRect(colors.surface, topLeft = androidx.compose.ui.geometry.Offset(inset, 19.dp.toPx()),
+                size = androidx.compose.ui.geometry.Size(size.width-inset*2, 33.dp.toPx()),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(inset))
+            val chart = Path().apply {
+                moveTo(inset*3, 44.dp.toPx())
+                lineTo(size.width*.35f, 29.dp.toPx())
+                lineTo(size.width*.6f, 39.dp.toPx())
+                lineTo(size.width-inset*3, 27.dp.toPx())
+            }
+            drawPath(chart, colors.primary, style = Stroke(2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+        } else {
+            listOf(colors.primary, colors.secondary, colors.tertiary).forEachIndexed { index, tone ->
+                val y = inset + index*17.dp.toPx()
+                drawRoundRect(colors.surface, topLeft = androidx.compose.ui.geometry.Offset(inset, y),
+                    size = androidx.compose.ui.geometry.Size(size.width-inset*2, 13.dp.toPx()),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(inset))
+                drawLine(tone, androidx.compose.ui.geometry.Offset(inset*3, y+inset),
+                    androidx.compose.ui.geometry.Offset(size.width*.55f, y+inset), 2.dp.toPx())
+                drawLine(colors.outlineVariant, androidx.compose.ui.geometry.Offset(inset*3, y+inset*2),
+                    androidx.compose.ui.geometry.Offset(size.width-inset*3, y+inset*2), 1.dp.toPx())
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PreferenceChoices(options: List<String>, selected: String,
+                              preview: (@Composable (String) -> Unit)? = null, onSelect: (String) -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    val stacked = maxWidth < (options.size * 88 * LocalDensity.current.fontScale.coerceAtLeast(1f)).dp
+    if (preview == null && stacked) {
+        Column(Modifier.fillMaxWidth().selectableGroup()) {
+            options.forEach { option ->
+                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                    .selectable(selected = selected == option, role = Role.RadioButton, onClick = { onSelect(option) })
+                    .padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(option.replaceFirstChar(Char::uppercaseChar), style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f))
+                    RadioButton(selected = selected == option, onClick = null)
+                }
+            }
+        }
+    } else if (preview == null) {
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            options.forEachIndexed { index, option ->
+                SegmentedButton(selected = selected == option, onClick = { onSelect(option) },
+                    shape = SegmentedButtonDefaults.itemShape(index, options.size),
+                    label = { Text(option.replaceFirstChar(Char::uppercaseChar), style = MaterialTheme.typography.labelLarge) })
+            }
+        }
+    } else {
+        val minimumWidth = (136 * LocalDensity.current.fontScale.coerceAtLeast(1f)).dp
+        FlowRow(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            options.forEach { option ->
+                val active = selected == option
+                Surface(modifier = Modifier.widthIn(min = minimumWidth).weight(1f), shape = MaterialTheme.shapes.medium,
+                    color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (active) Accent else Grid)) {
+                    Column(Modifier.selectable(selected = active, role = Role.RadioButton, onClick = { onSelect(option) })) {
+                        Row(Modifier.heightIn(min = 48.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(option, color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else Ink,
+                                style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                            RadioButton(selected = active, onClick = null)
+                        }
+                        Box(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp)) { preview(option) }
+                    }
+                }
+            }
+        }
+    }
+    }
+}
+
+@Composable
+private fun SettingsSwitch(title: String, detail: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 64.dp)
+        .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+        .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, color = Ink, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+            Text(detail, color = Muted, fontSize = 14.sp)
+        }
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+    }
+}
+
+@Composable
+private fun StoragePage(folder: Uri?, folderPath: String?,
+                       onBrowse: () -> Unit, onReset: () -> Unit, onOpen: () -> Unit) {
+    SettingsHeading("CSV exports", "Keep your recorded measurements together.")
+    SettingsGroup {
+        Text("Save location", color = Ink, style = MaterialTheme.typography.titleSmall)
+        Text(folderPath ?: "Ask where to save each export", color = Muted, fontSize = 14.sp)
+        Button(onClick = onBrowse, modifier = Modifier.fillMaxWidth()) { InstrumentIcon("folder", LocalContentColor.current, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Choose folder") }
+        OutlinedButton(onClick = onOpen, enabled = folder != null, modifier = Modifier.fillMaxWidth()) { InstrumentIcon("folder", LocalContentColor.current, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Open folder") }
+        TextButton(onClick = onReset, enabled = folder != null) { Text("Ask every time instead") }
+    }
+}
+
+@Composable
+private fun AboutPage(chosen: DeviceRecord?) {
+    val context = LocalContext.current
+    val appVersion = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
+        .getOrNull() ?: "Unknown"
+    SettingsHeading("About this app", "UWB localization and motion tracking.")
+    SettingsGroup {
+        Text("Local workspace", color = Ink, style = MaterialTheme.typography.titleSmall)
+        Text("No sign-in is required. Use Devices to manage your UWB network and Dashboard to view live measurements.",
+            color = Muted, fontSize = 14.sp, lineHeight = 20.sp)
+        SettingsValue("App version", appVersion)
+        SettingsValue("Selected device", chosen?.mac?.ifBlank { chosen.ip } ?: "None selected")
+    }
+}
+
+@Composable
+private fun DevicePropertiesPage(
+    snapshot: DashboardSnapshot,
+    names: Map<String, String>,
+    device: DeviceRecord?,
+    ip: String,
+    sample: JSONObject?,
+    cir: JSONObject?,
+    onRefresh: () -> Unit,
+    onApply: (DeviceRecord, JSONObject, (String) -> Unit) -> Unit,
+    onDeviceSelected: (String) -> Unit
+) {
+    var role by remember(device?.key) { mutableStateOf(device?.role ?: "anchor") }
+    var sensing by remember(device?.key) { mutableStateOf(sample?.optInt("sensing_interval_ms")?.takeIf { it > 0 }?.toString().orEmpty()) }
+    var sending by remember(device?.key) { mutableStateOf(sample?.optInt("send_interval_ms")?.takeIf { it > 0 }?.toString().orEmpty()) }
+    var antenna by remember(device?.key) { mutableStateOf(sample?.optInt("antenna_delay")?.toString().orEmpty()) }
+    var showDiagnostics by remember(device?.key) { mutableStateOf(false) }
+    var dirty by remember(device?.key) { mutableStateOf(false) }
+    var validation by remember(device?.key) { mutableStateOf("") }
+    var applyStatus by remember(device?.key) { mutableStateOf("") }
+    var applying by remember(device?.key) { mutableStateOf(false) }
+    LaunchedEffect(device?.key, sample?.optInt("sensing_interval_ms"), sample?.optInt("send_interval_ms"), sample?.optInt("antenna_delay")) {
+        if (!dirty) {
+            role = sample?.optString("role")?.takeIf { it == "tag" || it == "anchor" } ?: device?.role ?: "anchor"
+            sensing = sample?.optInt("sensing_interval_ms")?.takeIf { it > 0 }?.toString().orEmpty()
+            sending = sample?.optInt("send_interval_ms")?.takeIf { it > 0 }?.toString().orEmpty()
+            antenna = sample?.optInt("antenna_delay")?.toString().orEmpty()
+        }
+    }
+    SettingsHeading("Device configuration", "Read current values or apply supported settings.")
+    if (device == null) {
+        SettingsGroup { EmptyHint("Add or select a device to inspect its properties.") }
+        return
+    }
+    SettingsGroup {
+        Text("Selected device", color = Ink, fontWeight = FontWeight.SemiBold)
+        DevicePickerContent(snapshot.devices, device,
+            names, snapshot.states, onDeviceSelected)
+        Text("${device.mac.ifBlank { device.ip }} · ${if (snapshot.states[device.key]?.online == true) "Online" else "Offline"}", color = Muted, fontSize = 14.sp)
+        OutlinedButton(shape = MaterialTheme.shapes.medium,
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = onRefresh, enabled = ip.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Read configuration from device") }
+        Text("Supported configuration", color = Ink, fontWeight = FontWeight.SemiBold)
+        Text("The firmware validates these values before applying them.", color = Muted, fontSize = 14.sp)
+        Text("Device role", color = Ink, fontSize = 14.sp)
+        PreferenceChoices(listOf("anchor", "tag"), role) { role = it; dirty = true }
+        NumericField("Acquisition interval (20–60000 ms)", sensing, { sensing = it; dirty = true }, Modifier.fillMaxWidth())
+        NumericField("Reporting interval (50–60000 ms)", sending, { sending = it; dirty = true }, Modifier.fillMaxWidth())
+        NumericField("Antenna delay (0–65535 DTU)", antenna, { antenna = it; dirty = true }, Modifier.fillMaxWidth())
+        if (validation.isNotBlank()) Text(validation, color = Danger, fontSize = 14.sp)
+        if (applyStatus.isNotBlank()) Text(applyStatus, color = Muted, fontSize = 14.sp)
+        Button(shape = MaterialTheme.shapes.medium, onClick = {
+            val sense = sensing.toIntOrNull()
+            val send = sending.toIntOrNull()
+            val delay = antenna.toIntOrNull()
+            validation = when {
+                ip.isBlank() -> "This device has no IP address. Connect it to Wi-Fi first."
+                sense == null || sense !in 20..60000 -> "Acquisition interval must be 20–60000 ms."
+                send == null || send !in 50..60000 -> "Reporting interval must be 50–60000 ms."
+                delay == null || delay !in 0..65535 -> "Antenna delay must be 0–65535 DTU."
+                else -> ""
+            }
+            if (validation.isBlank()) {
+                applying = true
+                applyStatus = "Sending supported settings…"
+                val body = JSONObject().put("role", role).put("sensing_interval_ms", sense)
+                    .put("send_interval_ms", send).put("antenna_delay", delay)
+                onApply(device.copy(role = role), body) { response ->
+                    applying = false
+                    val success = runCatching { JSONObject(response).optBoolean("ok") }.getOrDefault(false)
+                    applyStatus = if (success) "Device accepted the configuration. Values update on the next telemetry sample."
+                        else response.ifBlank { "Device did not confirm the settings." }
+                    if (success) dirty = false
+                }
+            }
+        }, enabled = !applying && ip.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+            Text(if (applying) "Applying…" else "Apply changes")
+        }
+        Spacer(Modifier.height(16.dp))
+        TextButton(onClick = { showDiagnostics = !showDiagnostics }) {
+            Text(if (showDiagnostics) "Hide diagnostics" else "Show diagnostics")
+        }
+        if (showDiagnostics) {
+            SettingsValue("Firmware version", sample?.optString("firmware_version")?.takeIf { it.isNotBlank() } ?: "Not reported by firmware")
+            SettingsValue("Hardware version", sample?.optString("hardware_version")?.takeIf { it.isNotBlank() } ?: "Not reported by firmware")
+            SettingsValue("BLE status", sample?.optString("ble_status")?.takeIf { it.isNotBlank() } ?: "Not reported by firmware")
+            SettingsValue("UWB status", if (snapshot.states[device.key]?.online == true) "Telemetry connected" else "No current telemetry")
+            SettingsValue("IMU", if (sample?.has("imu_enabled") == true) if (sample.optBoolean("imu_enabled")) "Enabled" else "Disabled" else "Not reported")
+            SettingsValue("CIR", if (cir?.has("enabled") == true) if (cir.optBoolean("enabled")) "Enabled" else "Disabled" else "Not reported")
+            SettingsValue("CIR capture", cir?.optString("sample_count")?.takeIf { it.isNotBlank() }?.let { "$it samples" } ?: "No sample reported")
+            SettingsValue("CIR first path", cir?.optString("first_path_index")?.takeIf { it.isNotBlank() } ?: "Not reported")
+            Text("Individual CIR/IMU, UWB TX/RX, LED, persistence and restore-default controls are not exposed by this firmware.",
+                color = Muted, fontSize = 14.sp)
+        }
+        TextButton(onClick = {}, enabled = false) { Text("Restore device defaults · unsupported") }
+    }
+}
+
+@Composable
+private fun SettingsHeading(title: String, detail: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, color = Ink, fontWeight = FontWeight.Medium, fontSize = 20.sp)
+        Text(detail, color = Muted, fontSize = 14.sp, lineHeight = 20.sp)
+    }
+}
+
+@Composable
+private fun SettingsGroup(content: @Composable ColumnScope.() -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.medium) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    }
+}
+
+@Composable
+private fun SettingsValue(label: String, value: String) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Text(value, color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+    }
+}
+
+private fun storageFolderPath(context: android.content.Context, tree: Uri?): String? {
+    if (tree == null) return null
+    return runCatching {
+        val id = DocumentsContract.getTreeDocumentId(tree)
+        val document = DocumentsContract.buildDocumentUriUsingTree(tree, id)
+        val name = context.contentResolver.query(document, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+            null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        } ?: id.substringAfterLast('/')
+        when (tree.authority) {
+            "com.android.externalstorage.documents" -> {
+                val volume = id.substringBefore(':', "primary")
+                val relativePath = id.substringAfter(':', "").trim('/')
+                val root = if (volume.equals("primary", true)) "Internal storage" else "External storage"
+                if (relativePath.isBlank()) root else "$root/$relativePath"
+            }
+            "com.android.providers.downloads.documents" -> "Downloads/$name"
+            else -> "$name (${tree.authority})"
+        }
+    }.getOrNull()
 }
 
 @Composable
 private fun DevicePickerContent(devices: List<DeviceRecord>, chosen: DeviceRecord?, names: Map<String, String>,
                                 states: Map<String, DeviceState>, onSelect: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    Box {
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(9.dp).clip(CircleShape).background(if (chosen?.let { states[it.key]?.online } == true) Green else Muted))
-                Spacer(Modifier.width(8.dp))
-                Text(chosen?.let { "${names[it.key] ?: "Device"} | ${it.mac.ifBlank { it.ip }}" } ?: "Choose a device",
-                    color = Ink, modifier = Modifier.weight(1f))
-                Text("v", color = Cyan, fontSize = 18.sp)
+    Box(Modifier.fillMaxWidth()) {
+        Surface(onClick = { expanded = true }, enabled = devices.isNotEmpty(), shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp).semantics { contentDescription = "Select dashboard device" }) {
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                InstrumentIcon("devices", Accent)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(chosen?.let { "${names[it.key] ?: "Device"} · ${it.role.replaceFirstChar(Char::uppercaseChar)}" }
+                        ?: "No configured devices", color = Ink, style = MaterialTheme.typography.titleSmall)
+                    chosen?.let {
+                        Text(it.mac.ifBlank { it.ip }, color = Muted, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+                if (chosen != null) Text(if (states[chosen.key]?.online == true) "Online" else "Offline",
+                    color = if (states[chosen.key]?.online == true) Positive else Muted,
+                    style = MaterialTheme.typography.labelSmall)
+                InstrumentIcon("chevron", Muted)
             }
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.fillMaxWidth(.88f)) {
             devices.forEach { device ->
-                DropdownMenuItem(text = {
-                    Column {
-                        Text("${names[device.key] ?: "Device"} | ${device.role.uppercase()}", color = Ink)
-                        Text(device.mac.ifBlank { device.ip }, color = Muted, fontSize = 11.sp)
+                DropdownMenuItem(leadingIcon = { InstrumentIcon("devices", Muted) }, text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("${names[device.key] ?: "Device"} | ${device.role.replaceFirstChar(Char::uppercaseChar)}", color = Ink)
+                        Text(device.mac.ifBlank { device.ip }, color = Muted, fontSize = 13.sp)
                     }
                 }, onClick = { onSelect(device.key); expanded = false })
             }
@@ -568,11 +1406,81 @@ private fun DevicePickerContent(devices: List<DeviceRecord>, chosen: DeviceRecor
 }
 
 @Composable
-private fun DashboardGroup(content: @Composable ColumnScope.() -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White),
-        shape = RoundedCornerShape(18.dp), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
-        Column(Modifier.fillMaxWidth().padding(14.dp), content = content)
+private fun BatteryInfoState(message: String, warning: Boolean = false) {
+    Surface(shape = RoundedCornerShape(24.dp),
+        color = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant) {
+        Row(Modifier.fillMaxWidth().padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(message, color = if (warning) Warning else Muted, fontSize = 12.sp)
+        }
     }
+}
+
+@Composable
+private fun BatteryTelemetryCard(percent: Double, voltage: Double, reduceAnimations: Boolean) {
+    val tone by animateColorAsState(batteryLevelColor(percent, MaterialTheme.colorScheme.surface.luminance() < .5f),
+        animationSpec = tween(if (reduceAnimations) 0 else 300), label = "battery-detail-color")
+    val fill by animateFloatAsState((percent/100).toFloat().coerceIn(0f, 1f),
+        animationSpec = tween(if (reduceAnimations) 0 else 300), label = "battery-detail-fill")
+    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceVariant,
+        border = androidx.compose.foundation.BorderStroke(1.dp, tone.copy(alpha = .3f))) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Charge", color = Muted, fontSize = 12.sp)
+                    Text("${percent.toInt()}%", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("Voltage", color = Muted, fontSize = 12.sp)
+                    Text(String.format(Locale.US, "%.2f V", voltage), color = Ink, fontSize = 18.sp)
+                }
+            }
+            Box(Modifier.fillMaxWidth().height(8.dp).clip(MaterialTheme.shapes.small).background(tone.copy(alpha = .14f))) {
+                Box(Modifier.fillMaxWidth(fill).height(8.dp).background(tone))
+            }
+        }
+    }
+}
+
+@Composable
+private fun BatteryIcon(label: String, percent: Double, tint: Color, modifier: Modifier = Modifier, reduceAnimations: Boolean) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End)) {
+        BatteryGlyph(percent.toFloat(), tint, Modifier.size(width = 28.dp, height = 16.dp), reduceAnimations)
+        Text(label, color = Ink, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium,
+            maxLines = 1, softWrap = false)
+    }
+}
+
+@Composable
+private fun BatteryGlyph(percent: Float, tint: Color, modifier: Modifier, reduceAnimations: Boolean) {
+    val fill by animateFloatAsState(percent.coerceIn(0f, 100f)/100f,
+        animationSpec = tween(if (reduceAnimations) 0 else 300), label = "battery-icon-fill")
+    Canvas(modifier) {
+        val stroke = 1.5.dp.toPx()
+        val bodyWidth = size.width-4.dp.toPx()
+        val inset = stroke/2
+        val bodySize = androidx.compose.ui.geometry.Size(bodyWidth-stroke, size.height-stroke)
+        val corner = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx())
+        drawRoundRect(tint.copy(alpha = .1f), topLeft = androidx.compose.ui.geometry.Offset(inset, inset), size = bodySize, cornerRadius = corner)
+        drawRoundRect(tint, topLeft = androidx.compose.ui.geometry.Offset(inset, inset), size = bodySize, cornerRadius = corner, style = Stroke(stroke))
+        val innerWidth = (bodySize.width-stroke*2).coerceAtLeast(0f)*fill
+        if (innerWidth > 0f) drawRoundRect(tint.copy(alpha = .85f),
+            topLeft = androidx.compose.ui.geometry.Offset(inset+stroke, inset+stroke),
+            size = androidx.compose.ui.geometry.Size(innerWidth, bodySize.height-stroke*2),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx()))
+        drawRoundRect(tint, topLeft = androidx.compose.ui.geometry.Offset(bodyWidth+1.dp.toPx(), size.height*.3f),
+            size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height*.4f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx()))
+    }
+}
+
+@Composable
+private fun DashboardGroup(withContainers: Boolean, content: @Composable ColumnScope.() -> Unit) {
+    if (withContainers) {
+        Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(20.dp), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), content = content)
+        }
+    } else Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 8.dp), content = content)
 }
 
 @Composable
@@ -580,8 +1488,8 @@ private fun GroupedSection(title: String, headerAction: (@Composable () -> Unit)
                            content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold,
-                letterSpacing = .7.sp, modifier = Modifier.weight(1f))
+            Text(title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium,
+                letterSpacing = 0.sp, modifier = Modifier.weight(1f))
             headerAction?.invoke()
         }
         Spacer(Modifier.height(8.dp))
@@ -591,80 +1499,86 @@ private fun GroupedSection(title: String, headerAction: (@Composable () -> Unit)
 
 @Composable
 private fun GroupDivider() {
-    Spacer(Modifier.height(12.dp))
-    Spacer(Modifier.fillMaxWidth().height(1.dp).background(Page))
-    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.height(24.dp))
+    Spacer(Modifier.fillMaxWidth().height(1.dp).background(Grid))
+    Spacer(Modifier.height(24.dp))
 }
 
 @Composable
-private fun ConfigurationDialog(snapshot: DashboardSnapshot, names: Map<String, String>, repo: DeviceRepository,
+private fun DevicesPage(snapshot: DashboardSnapshot, names: Map<String, String>, repo: DeviceRepository,
                                 onScan: () -> Unit, onAdd: () -> Unit, onEdit: (DeviceRecord) -> Unit,
-                                onClear: () -> Unit, onWifiProvision: () -> Unit, onDismiss: () -> Unit) {
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(Modifier.fillMaxWidth(.94f).fillMaxSize(.88f), shape = RoundedCornerShape(22.dp), color = Page) {
-            Column(Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("DEVICE CONFIGURATION", color = Ink, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
-                        Text("Manage your localization network", color = Muted, fontSize = 11.sp)
-                    }
-                    TextButton(onClick = onDismiss) { Text("Done") }
+                                onClear: () -> Unit, onWifiSetup: () -> Unit) {
+    Surface(Modifier.fillMaxSize(), color = Page) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Devices", color = Ink, style = MaterialTheme.typography.headlineMedium)
+                    Text("${snapshot.devices.size} saved \u00b7 ${snapshot.discovered.size} discovered", color = Muted, fontSize = 14.sp)
                 }
-                Text("Add devices, assign roles, and set measured X/Y/Z map coordinates.", color = Muted, fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 5.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 12.dp)) {
-                    OutlinedButton(onClick = onScan, modifier = Modifier.weight(1f)) { Text("Scan network", maxLines = 1) }
-                    Button(onClick = onAdd, modifier = Modifier.weight(1f)) { Text("+  Add device", maxLines = 1) }
+                TextButton(onClick = onWifiSetup) { InstrumentIcon("wifi", LocalContentColor.current, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Wi-Fi setup") }
+            }
+            Text("Add devices, assign roles, and set measured X/Y/Z map coordinates.", color = Muted, fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp))
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(shape = MaterialTheme.shapes.medium,
+                colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = onScan, modifier = Modifier.weight(1f).fillMaxHeight().heightIn(min = 56.dp)) { InstrumentIcon("scan", LocalContentColor.current, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Scan network") }
+                Button(shape = MaterialTheme.shapes.medium,
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant, disabledContentColor = Muted), onClick = onAdd, modifier = Modifier.weight(1f).fillMaxHeight().heightIn(min = 56.dp)) { InstrumentIcon("add", LocalContentColor.current, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Add device") }
+            }
+            Box(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+                FeedbackMessage(snapshot.status, busy = snapshot.status.startsWith("Scanning"))
+            }
+            LazyColumn(Modifier.weight(1f).fillMaxWidth().clipToBounds(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (snapshot.devices.isNotEmpty()) item {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Saved devices", color = Ink, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                        TextButton(onClick = onClear) { Text("Clear all", color = Danger) }
+                    }
                 }
-                OutlinedButton(onClick = onWifiProvision, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) { Text("Configure Wi-Fi via Bluetooth") }
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-                    Box(Modifier.size(7.dp).clip(CircleShape).background(Cyan))
-                    Text(repo.snapshot().status, color = Muted, fontSize = 10.sp, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = 6.dp))
-                    TextButton(onClick = onClear) { Text("Clear all", color = Red, fontSize = 11.sp) }
+                items(snapshot.devices, key = { it.key }) { device ->
+                    ConfigurationDeviceRow(device, names[device.key] ?: "Device", snapshot.states[device.key],
+                        onEdit = { onEdit(device) }, onDelete = { repo.remove(device.key) },
+                        onApplyRole = {
+                            if (device.ip.isBlank()) repo.setStatus("Scan or add an IP before applying the role")
+                            else repo.postControl(device.ip, JSONObject().put("role", device.role), device.mac)
+                        })
                 }
-                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (snapshot.devices.isNotEmpty()) item {
-                        Text("SAVED DEVICES", color = Cyan, fontWeight = FontWeight.Bold, fontSize = 11.sp,
-                            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp))
+                val available = snapshot.discovered.filter { found ->
+                    snapshot.devices.none { device ->
+                        if (found.mac.isNotBlank() && device.mac.isNotBlank())
+                            found.mac.equals(device.mac, ignoreCase = true)
+                        else device.ip == found.ip
                     }
-                    items(snapshot.devices, key = { it.key }) { device ->
-                        ConfigurationDeviceRow(device, names[device.key] ?: "Device", snapshot.states[device.key],
-                            onEdit = { onEdit(device) }, onDelete = { repo.remove(device.key) },
-                            onApplyRole = {
-                                if (device.ip.isBlank()) repo.setStatus("Scan or add an IP before applying the role")
-                                else repo.postControl(device.ip, JSONObject().put("role", device.role), device.mac)
-                            })
-                    }
-                    val available = snapshot.discovered.filter { found ->
-                        snapshot.devices.none { device ->
-                            if (found.mac.isNotBlank() && device.mac.isNotBlank())
-                                found.mac.equals(device.mac, ignoreCase = true)
-                            else device.ip == found.ip
-                        }
-                    }
-                    if (available.isNotEmpty()) item {
-                        Text("DISCOVERED ON NETWORK", color = Cyan, fontWeight = FontWeight.Bold, fontSize = 11.sp,
-                            modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
-                    }
-                    items(available, key = { "found-${it.mac}" }) { found ->
-                        Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(12.dp)) {
-                            Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(found.mac, color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
-                                    maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
-                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                    Text("${found.ip} · ${found.role.uppercase()}", color = Muted, fontSize = 10.sp,
-                                        maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f))
-                                    Surface(color = Color(0xFFE8F5EE), shape = RoundedCornerShape(20.dp)) {
-                                        Text("FOUND", color = Green, fontWeight = FontWeight.Bold, fontSize = 9.sp,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
-                                    }
-                                    TextButton(onClick = {
-                                        onEdit(DeviceRecord(found.mac, found.ip, found.role.takeIf { it == "tag" || it == "anchor" } ?: "anchor"))
-                                    }) { Text("Configure") }
+                }
+                if (available.isEmpty() && snapshot.devices.isEmpty()) item {
+                    EmptyHint("No devices configured yet. Scan the shared Wi-Fi network or add a device by MAC address or IP.")
+                }
+                if (available.isNotEmpty()) item {
+                    Text("Discovered on network", color = Accent, fontWeight = FontWeight.Medium, fontSize = 14.sp,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
+                }
+                items(available, key = { "found-${it.mac}" }) { found ->
+                    Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(20.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            SelectionContainer {
+                                Text(found.mac, color = Ink, fontWeight = FontWeight.Medium,
+                                    fontSize = 14.sp, fontFamily = FontFamily.Monospace)
+                            }
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${found.ip} · ${found.role.replaceFirstChar(Char::uppercaseChar)}", color = Muted, fontSize = 14.sp,
+                                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f))
+                                Surface(color = androidx.compose.material3.MaterialTheme.colorScheme.positiveContainer, shape = RoundedCornerShape(4.dp)) {
+                                    Text("Found", color = Positive, fontWeight = FontWeight.Medium, fontSize = 12.sp,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
                                 }
+                                TextButton(onClick = {
+                                    onEdit(DeviceRecord(found.mac, found.ip, found.role.takeIf { it == "tag" || it == "anchor" } ?: "anchor"))
+                                }) { Text("Configure") }
                             }
                         }
                     }
@@ -794,6 +1708,7 @@ private class ProvisionConnectionObserver(
 @Composable
 private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     val manager = remember { ESPProvisionManager.getInstance(context.applicationContext) }
     var devices by remember { mutableStateOf<List<BleProvisionTarget>>(emptyList()) }
     val savedCredentials = remember { LastWifiCredentialStore.load(context) }
@@ -815,7 +1730,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     var showPassword by remember { mutableStateOf(false) }
     val observer = remember {
         ProvisionConnectionObserver(
-            onConnected = { bleConnected = true; status = "Connected. Enter the phone hotspot name and password." },
+            onConnected = { bleConnected = true; status = "Connected. Enter the Wi-Fi network name and password." },
             onFailed = { bleConnected = false; status = it }
         )
     }
@@ -858,24 +1773,29 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     LaunchedEffect(Unit) { scan() }
 
     Dialog(onDismissRequest = ::dismissDialog, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(Modifier.fillMaxWidth(.94f), shape = RoundedCornerShape(22.dp), color = Page) {
-            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        Surface(Modifier.widthIn(max = 560.dp).fillMaxWidth(.94f).heightIn(max = 760.dp), shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("SET UP DEVICE WI-FI", color = Ink, fontWeight = FontWeight.ExtraBold,
+                    Text("Device Wi-Fi", color = Ink, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f))
                     TextButton(onClick = ::dismissDialog) { Text("Close") }
                 }
-                Text("Enter this phone's hotspot name and password. Keep its hotspot enabled so the device can join the same local network.",
-                    color = Amber, fontSize = 12.sp)
-                OutlinedButton(onClick = scan, enabled = !scanning, modifier = Modifier.fillMaxWidth()) {
+                Text("Use a Wi-Fi network shared by your phone and UWB devices. If using your phone's hotspot, keep it enabled during setup.",
+                    color = Muted, fontSize = 14.sp)
+                Text("1. Choose a UWB device", color = Ink, style = MaterialTheme.typography.titleSmall)
+                OutlinedButton(shape = MaterialTheme.shapes.medium,
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = scan, enabled = !scanning, modifier = Modifier.fillMaxWidth()) {
                     Text(if (scanning) "Scanning…" else "Scan for UWB devices")
                 }
                 if (devices.isNotEmpty()) {
                     LazyColumn(Modifier.height(128.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         items(devices) { target ->
-                            OutlinedButton(onClick = {
+                            val deviceLabel = try { target.device.name ?: target.device.address }
+                                catch (_: SecurityException) { "UWB device (Bluetooth permission unavailable)" }
+                            OutlinedButton(shape = MaterialTheme.shapes.medium,
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = {
                                 bleConnected = false
-                                status = "Connecting to " + (target.device.name ?: "UWB device") + "…"
+                                status = "Connecting to " + deviceLabel + "…"
                                 val esp = manager.createESPDevice(ESPConstants.TransportType.TRANSPORT_BLE,
                                     ESPConstants.SecurityType.SECURITY_1)
                                 esp.setProofOfPossession("")
@@ -884,27 +1804,32 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                                 activeDevice = esp
                                 esp.connectBLEDevice(target.device, target.serviceUuid)
                             }, modifier = Modifier.fillMaxWidth()) {
-                                Text(target.device.name ?: target.device.address, maxLines = 1,
+                                Text(deviceLabel, maxLines = 1,
                                     overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
                 }
+                Text("2. Connect it to Wi-Fi", color = Ink, style = MaterialTheme.typography.titleSmall)
                 OutlinedTextField(value = ssid, onValueChange = { ssid = it }, label = { Text("Wi-Fi network name") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth())
+                    shape = MaterialTheme.shapes.small, singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Wi-Fi password") },
-                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    shape = MaterialTheme.shapes.small, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                     visualTransformation = if (showPassword) androidx.compose.ui.text.input.VisualTransformation.None
                         else androidx.compose.ui.text.input.PasswordVisualTransformation(),
                     trailingIcon = {
-                        TextButton(onClick = { showPassword = !showPassword }) {
-                            Text(if (showPassword) "Hide" else "Show")
-                        }
+                        IconButton(onClick = { showPassword = !showPassword }, modifier = Modifier.semantics {
+                            contentDescription = if (showPassword) "Hide Wi-Fi password" else "Show Wi-Fi password"
+                        }) { InstrumentIcon(if (showPassword) "eyeOff" else "eye", Muted) }
                     },
                     modifier = Modifier.fillMaxWidth())
-                Text(status, color = if (status.contains("failed", true) || status.contains("could not", true)) Red else Muted,
-                    fontSize = 12.sp)
-                Button(onClick = {
+                FeedbackMessage(status, busy = scanning || sending)
+                if (!bleConnected) Text("Connect to a nearby UWB device to enable credential transfer", color = Muted, fontSize = 14.sp)
+                Button(shape = MaterialTheme.shapes.medium,
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant, disabledContentColor = Muted), onClick = {
+                    focusManager.clearFocus()
                     LastWifiCredentialStore.save(context, ssid, password)
                     val esp = activeDevice
                     if (esp == null || !bleConnected || ssid.isBlank()) {
@@ -945,7 +1870,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                             sending = false; status = "Provisioning failed: " + (e.localizedMessage ?: "unknown error")
                         }
                     })
-                }, enabled = !sending && bleConnected, modifier = Modifier.fillMaxWidth()) {
+                }, enabled = !sending && bleConnected && ssid.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
                     Text(if (sending) "Connecting…" else "Send Wi-Fi credentials")
                 }
             }
@@ -955,21 +1880,23 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
 
 @Composable
 private fun MapLegend() {
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        MapLegendItem(tag = false, label = "Active anchor", tint = Green, modifier = Modifier.weight(1f))
-        MapLegendItem(tag = false, label = "Offline anchor", tint = Muted, modifier = Modifier.weight(1f))
-        MapLegendItem(tag = true, label = "Tag", tint = Cyan, modifier = Modifier.weight(.7f))
+    FlowRow(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        MapLegendItem(false, "Online anchor", Positive)
+        MapLegendItem(false, "Offline anchor", Muted)
+        MapLegendItem(true, "Tag", Accent)
     }
 }
 
 @Composable
 private fun MapLegendItem(tag: Boolean, label: String, tint: Color, modifier: Modifier = Modifier) {
+    val ink = Ink
+    val muted = Muted
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         Canvas(Modifier.size(14.dp)) {
             if (tag) {
                 drawCircle(tint, radius = size.minDimension * .34f)
-                drawCircle(Ink, radius = size.minDimension * .34f, style = Stroke(1.dp.toPx()))
+                drawCircle(ink, radius = size.minDimension * .34f, style = Stroke(1.dp.toPx()))
             } else {
                 val triangle = Path().apply {
                     moveTo(size.width / 2, 1.dp.toPx())
@@ -978,74 +1905,85 @@ private fun MapLegendItem(tag: Boolean, label: String, tint: Color, modifier: Mo
                     close()
                 }
                 drawPath(triangle, tint)
-                drawPath(triangle, Ink, style = Stroke(1.dp.toPx()))
+                drawPath(triangle, ink, style = Stroke(1.dp.toPx()))
             }
         }
         Spacer(Modifier.width(4.dp))
-        Text(label, color = Muted, fontSize = 9.sp, maxLines = 1, softWrap = false,
-            overflow = TextOverflow.Ellipsis)
+        Text(label, color = muted, fontSize = 12.sp)
     }
 }
 
 @Composable
 private fun ConfigurationDeviceRow(device: DeviceRecord, name: String, state: DeviceState?, onEdit: () -> Unit,
                                    onDelete: () -> Unit, onApplyRole: () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
-        val receivedAt = state?.sample?.optLong("_received_at", 0L) ?: 0L
-        val ageMs = (System.currentTimeMillis() - receivedAt).coerceAtLeast(0L)
-        val presence = when {
-            state?.online == true -> "ACTIVE"
-            receivedAt > 0L && ageMs <= 15_000L -> "STALE"
-            else -> "OFFLINE"
-        }
-        val presenceColor = when (presence) {
-            "ACTIVE" -> Green
-            "STALE" -> Amber
-            else -> Muted
-        }
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(name, color = Ink, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(device.mac.ifBlank { device.ip }, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    var actionsOpen by remember(device.key) { mutableStateOf(false) }
+    val receivedAt = state?.sample?.optLong("_received_at", 0L) ?: 0L
+    val ageMs = (System.currentTimeMillis() - receivedAt).coerceAtLeast(0L)
+    val presence = when {
+        state?.online == true -> "Online"
+        receivedAt > 0L && ageMs <= 15_000L -> "Stale"
+        else -> "Offline"
+    }
+    val presenceColor = when (presence) {
+        "Online" -> Positive
+        "Stale" -> Warning
+        else -> Muted
+    }
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(name, color = Ink, fontWeight = FontWeight.Medium, fontSize = 16.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Surface(color = if (device.role == "anchor") MaterialTheme.colorScheme.positiveContainer else MaterialTheme.colorScheme.primaryContainer,
+                    shape = MaterialTheme.shapes.extraSmall) {
+                    Text(device.role.replaceFirstChar(Char::uppercaseChar),
+                        color = if (device.role == "anchor") MaterialTheme.colorScheme.onPositiveContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+                        style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
                 }
-                Surface(color = Color(0xFFEAF7F8), shape = RoundedCornerShape(20.dp)) {
-                    Text(device.role.uppercase(), color = Cyan, fontWeight = FontWeight.Bold, fontSize = 9.sp,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
-                }
-                TextButton(onClick = onEdit) { Text("Edit", fontSize = 11.sp) }
-            }
-            Text("X ${device.x.fmt()}   Y ${device.y.fmt()}   Z ${device.z.fmt()} m", color = Muted, fontSize = 10.sp,
-                maxLines = 1, modifier = Modifier.padding(top = 4.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 3.dp)) {
-                val freshness = when {
-                    receivedAt <= 0L -> "No telemetry received"
-                    ageMs < 1_000L -> "Telemetry received just now"
-                    else -> "Last telemetry ${ageMs / 1_000L}s ago"
-                }
-                Text(freshness, color = Muted, fontSize = 10.sp, maxLines = 1,
-                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                val statusBackground = when (presence) {
-                    "ACTIVE" -> Color(0xFFE8F5EE)
-                    "STALE" -> Color(0xFFFFF3DF)
-                    else -> Color(0xFFF1F3F4)
-                }
-                Surface(color = statusBackground, shape = RoundedCornerShape(20.dp)) {
-                    Text(presence, color = presenceColor, fontWeight = FontWeight.Bold, fontSize = 9.sp,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                Text(presence, color = presenceColor, fontSize = 13.sp)
+                Box {
+                    IconButton(onClick = { actionsOpen = true },
+                        modifier = Modifier.semantics { contentDescription = "Actions for $name" }) {
+                        InstrumentIcon("menu", Muted)
+                    }
+                    DropdownMenu(expanded = actionsOpen, onDismissRequest = { actionsOpen = false }) {
+                        DropdownMenuItem(leadingIcon = { InstrumentIcon("edit", Muted) }, text = { Text("Edit device") }, onClick = { actionsOpen = false; onEdit() })
+                        DropdownMenuItem(leadingIcon = { InstrumentIcon("tune", Muted) }, text = { Text("Apply role") }, onClick = { actionsOpen = false; onApplyRole() })
+                        DropdownMenuItem(leadingIcon = { InstrumentIcon("delete", Danger) }, text = { Text("Remove device", color = Danger) }, onClick = { actionsOpen = false; onDelete() })
+                    }
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 8.dp, top = 2.dp)) {
-                TextButton(onClick = onApplyRole) { Text("Apply role", fontSize = 11.sp) }
-                TextButton(onClick = onDelete) { Text("Remove", color = Red, fontSize = 11.sp) }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SelectionContainer {
+                    Text(device.mac.ifBlank { device.ip }, color = Muted, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                }
+                if (device.ip.isNotBlank() && device.mac.isNotBlank()) {
+                    SelectionContainer { Text(device.ip, color = Muted, fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
+                }
             }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("X" to device.x, "Y" to device.y, "Z" to device.z).forEach { (axis, value) ->
+                    Text("$axis ${value.fmt()} m", color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                }
+            }
+            val freshness = when {
+                receivedAt <= 0L -> "No telemetry yet"
+                ageMs < 1_000L -> "Updated just now"
+                else -> "Updated ${ageMs / 1_000L}s ago"
+            }
+            Text(freshness, color = Muted, fontSize = 13.sp)
         }
     }
 }
 
 @Composable
 private fun EmptyHint(text: String) {
-    Text(text, color = Muted, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp))
+    Row(Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        InstrumentIcon("info", Muted, Modifier.size(24.dp))
+        Text(text, color = Muted, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+    }
 }
 
 private fun cirHeatColor(value: Double, maximum: Double): Color {
@@ -1086,27 +2024,27 @@ private fun CirPlot(data: JSONObject, history: List<CirFrame>, modifier: Modifie
     val windowSpan = max(1, windowEnd - windowStart)
     val firstPath = data.optInt("first_path_index") / 64.0
     val firstPathVisible = firstPath in windowStart.toDouble()..windowEnd.toDouble()
-    Canvas(modifier.clip(RoundedCornerShape(8.dp)).background(Color(0xFF05080C))) {
+    Canvas(modifier.clip(RoundedCornerShape(12.dp)).background(Color(0xFF1B2330))) {
         val left = 40.dp.toPx()
         val right = size.width - 9.dp.toPx()
         val top = 22.dp.toPx()
         val traceBottom = size.height * .36f
         val heatTop = traceBottom + 34.dp.toPx()
         val heatBottom = size.height - 27.dp.toPx()
-        drawRect(Color(0xFF05080C))
+        drawRect(Color(0xFF1B2330))
 
         val textPaint = android.graphics.Paint().apply {
-            color = android.graphics.Color.rgb(213, 231, 239)
-            textSize = 9.sp.toPx()
+            color = android.graphics.Color.rgb(226, 231, 239)
+            textSize = 12.sp.toPx()
             isAntiAlias = true
         }
-        drawIntoCanvas { it.nativeCanvas.drawText("CIR MAGNITUDE  ·  LIVE", left, 13.dp.toPx(), textPaint) }
+        drawIntoCanvas { it.nativeCanvas.drawText("CIR magnitude", left, 13.dp.toPx(), textPaint) }
 
         val amplitudeMax = max(iq.maxOrNull() ?: 1.0, 1.0)
         repeat(4) { tick ->
             val fraction = tick / 3f
             val y = traceBottom - fraction * (traceBottom - top)
-            drawLine(Color(0xFF27313A), androidx.compose.ui.geometry.Offset(left, y),
+            drawLine(Color(0xFF3C4755), androidx.compose.ui.geometry.Offset(left, y),
                 androidx.compose.ui.geometry.Offset(right, y), 1f)
         }
         val trace = Path()
@@ -1132,21 +2070,21 @@ private fun CirPlot(data: JSONObject, history: List<CirFrame>, modifier: Modifie
             area.lineTo(left + (sampleStart + iq.lastIndex - windowStart).coerceIn(0, windowSpan).toFloat() /
                 windowSpan * (right - left), traceBottom)
             area.close()
-            drawPath(area, Color(0xFF10313B))
-            drawPath(trace, Color(0xFF55D7E8), style = Stroke(1.5.dp.toPx()))
+            drawPath(area, Color(0xFF25364B))
+            drawPath(trace, Color(0xFF94B5D8), style = Stroke(1.5.dp.toPx()))
         }
         if (firstPathVisible) {
             val x = left + ((firstPath - windowStart) / windowSpan).toFloat() * (right - left)
-            drawLine(Color(0xFFF4B84A), androidx.compose.ui.geometry.Offset(x, top),
+            drawLine(Color(0xFFE8AA76), androidx.compose.ui.geometry.Offset(x, top),
                 androidx.compose.ui.geometry.Offset(x, traceBottom), 1.dp.toPx())
         }
 
         drawIntoCanvas {
-            textPaint.color = android.graphics.Color.rgb(213, 231, 239)
-            it.nativeCanvas.drawText("CIR WATERFALL  ·  OLDEST → NEWEST  ·  ${history.size}",
+            textPaint.color = android.graphics.Color.rgb(226, 231, 239)
+            it.nativeCanvas.drawText("CIR waterfall \u00b7 oldest to newest \u00b7 ${history.size}",
                 left, heatTop - 7.dp.toPx(), textPaint)
         }
-        drawRect(Color(0xFF041A3B), androidx.compose.ui.geometry.Offset(left, heatTop),
+        drawRect(Color(0xFF202C3C), androidx.compose.ui.geometry.Offset(left, heatTop),
             androidx.compose.ui.geometry.Size(right - left, heatBottom - heatTop))
         val strongest = max(history.maxOfOrNull { it.magnitude.maxOrNull() ?: 0.0 } ?: 0.0, 1.0)
         if (history.isNotEmpty() && heatBottom > heatTop) {
@@ -1167,12 +2105,12 @@ private fun CirPlot(data: JSONObject, history: List<CirFrame>, modifier: Modifie
         }
         if (firstPathVisible) {
             val x = left + ((firstPath - windowStart) / windowSpan).toFloat() * (right - left)
-            drawLine(Color(0xFFF4B84A), androidx.compose.ui.geometry.Offset(x, heatTop),
+            drawLine(Color(0xFFE8AA76), androidx.compose.ui.geometry.Offset(x, heatTop),
                 androidx.compose.ui.geometry.Offset(x, heatBottom), 1.dp.toPx())
         }
         drawIntoCanvas { canvas ->
-            textPaint.textSize = 8.sp.toPx()
-            textPaint.color = android.graphics.Color.rgb(181, 195, 204)
+            textPaint.textSize = 12.sp.toPx()
+            textPaint.color = android.graphics.Color.rgb(186, 197, 211)
             listOf(0f, .5f, 1f).forEach { fraction ->
                 val x = left + fraction * (right - left)
                 val label = "${(windowStart + fraction * windowSpan).toInt()}"
@@ -1180,7 +2118,7 @@ private fun CirPlot(data: JSONObject, history: List<CirFrame>, modifier: Modifie
                     size.height - 8.dp.toPx(), textPaint)
             }
             if (firstPathVisible) {
-                textPaint.color = android.graphics.Color.rgb(244, 184, 74)
+                textPaint.color = android.graphics.Color.rgb(232, 170, 118)
                 val label = "FP ${"%.1f".format(Locale.US, firstPath)}"
                 canvas.nativeCanvas.drawText(label, left + 3.dp.toPx(), top + 10.dp.toPx(), textPaint)
             }
@@ -1191,6 +2129,9 @@ private fun CirPlot(data: JSONObject, history: List<CirFrame>, modifier: Modifie
 @Composable
 private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boolean,
                      modifier: Modifier = Modifier) {
+    val axisColors = listOf(Danger, Positive, MaterialTheme.colorScheme.axisZ)
+    val gridColor = Grid
+    val mutedColor = Muted
     val series = if (acceleration) {
         listOf(history.map { it.ax }, history.map { it.ay }, history.map { it.az })
     } else {
@@ -1201,16 +2142,16 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
         listOf(latest.ax, latest.ay, latest.az) else listOf(latest.gx, latest.gy, latest.gz)
     Column(modifier) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, color = Muted, fontWeight = FontWeight.Bold, fontSize = 10.sp,
+            Text(title, color = Muted, fontWeight = FontWeight.Medium, fontSize = 14.sp,
                 modifier = Modifier.weight(1f))
             listOf("X", "Y", "Z").forEachIndexed { i, axis ->
-                Text(axis, color = listOf(Red, Green, Cyan)[i], fontWeight = FontWeight.Bold,
-                    fontSize = 9.sp, modifier = Modifier.padding(start = 7.dp))
+                Text(axis, color = axisColors[i], fontWeight = FontWeight.Medium,
+                    fontSize = 12.sp, modifier = Modifier.padding(start = 8.dp))
             }
         }
-        Canvas(Modifier.fillMaxWidth().height(96.dp).padding(top = 3.dp)
-            .clip(RoundedCornerShape(8.dp)).background(Color(0xFFF8FAFB))) {
-            val left = 36.dp.toPx()
+        Canvas(Modifier.fillMaxWidth().height(120.dp).semantics { contentDescription = "$title. Recent X, Y and Z readings" }.padding(top = 4.dp)
+            .clip(RoundedCornerShape(12.dp)).background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant)) {
+            val left = 52.dp.toPx()
             val right = size.width - 7.dp.toPx()
             val top = 8.dp.toPx()
             val bottom = size.height - 14.dp.toPx()
@@ -1225,7 +2166,7 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
             val center = (top + bottom) / 2
             listOf(0f, .5f, 1f).forEach { fraction ->
                 val y = top + (bottom - top) * fraction
-                drawLine(Grid, androidx.compose.ui.geometry.Offset(left, y),
+                drawLine(gridColor, androidx.compose.ui.geometry.Offset(left, y),
                     androidx.compose.ui.geometry.Offset(right, y), 1f)
             }
             series.forEachIndexed { axis, values ->
@@ -1237,14 +2178,14 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
                 }
                 if (values.size == 1) {
                     val y = center - (values[0] / peak).toFloat() * (bottom - top) / 2
-                    drawCircle(listOf(Red, Green, Cyan)[axis], 2.5f,
+                    drawCircle(axisColors[axis], 2.5f,
                         androidx.compose.ui.geometry.Offset(left, y))
-                } else if (values.size > 1) drawPath(path, listOf(Red, Green, Cyan)[axis], style = Stroke(2f))
+                } else if (values.size > 1) drawPath(path, axisColors[axis], style = Stroke(2f))
             }
             drawIntoCanvas { canvas ->
                 val paint = android.graphics.Paint().apply {
-                    color = Muted.toArgb()
-                    textSize = 8.sp.toPx()
+                    color = mutedColor.toArgb()
+                    textSize = 12.sp.toPx()
                     textAlign = android.graphics.Paint.Align.RIGHT
                     isAntiAlias = true
                 }
@@ -1256,8 +2197,8 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
         }
         if (current.isNotEmpty()) {
             Text(current.mapIndexed { i, value -> "${listOf("X", "Y", "Z")[i]} ${String.format(Locale.US, "%+.2f", value)}" }
-                .joinToString("    "), color = Ink, fontSize = 9.sp,
-                modifier = Modifier.padding(top = 3.dp))
+                .joinToString("    "), color = Ink, fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp))
         }
     }
 }
@@ -1265,14 +2206,14 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
 @Composable
 private fun SectionCard(title: String, headerAction: (@Composable () -> Unit)? = null,
                         content: @Composable ColumnScope.() -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(18.dp), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
-        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+    Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(20.dp), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = .7.sp, modifier = Modifier.weight(1f))
+                Text(title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium,
+                    letterSpacing = 0.sp, modifier = Modifier.weight(1f))
                 headerAction?.invoke()
             }
-            Spacer(Modifier.height(9.dp))
+            Spacer(Modifier.height(8.dp))
             content()
         }
     }
@@ -1299,25 +2240,24 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
     AlertDialog(onDismissRequest = onDismiss,
         title = { Text(if (device == null) "Add UWB device" else "Edit UWB device") },
         text = {
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                OutlinedTextField(mac, { mac = it }, label = { Text("MAC address") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(ip, { ip = it }, label = { Text("IPv4 address") }, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(role == "anchor", { role = "anchor" }); Text("Anchor")
-                    Spacer(Modifier.width(10.dp)); RadioButton(role == "tag", { role = "tag" }); Text("Tag")
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(mac, { mac = it }, label = { Text("MAC address") }, shape = MaterialTheme.shapes.small, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(ip, { ip = it }, label = { Text("IPv4 address") }, shape = MaterialTheme.shapes.small, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                Text("Device role", color = Ink, style = MaterialTheme.typography.titleSmall)
+                PreferenceChoices(listOf("anchor", "tag"), role) { role = it }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     NumericField("X (m)", x, { x = it }, Modifier.weight(1f))
                     NumericField("Y (m)", y, { y = it }, Modifier.weight(1f))
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     NumericField("Z (m)", z, { z = it }, Modifier.weight(1f))
                     NumericField("Yaw offset°", yaw, { yaw = it }, Modifier.weight(1f))
                 }
                 OutlinedTextField(tlsFingerprint, { tlsFingerprint = it },
-                    label = { Text("TLS certificate fingerprint (optional; blank uses local HTTP)") }, singleLine = true,
+                    label = { Text("TLS fingerprint (optional)") },
+                    supportingText = { Text("Leave blank to use local HTTP") }, shape = MaterialTheme.shapes.small, singleLine = true,
                     modifier = Modifier.fillMaxWidth())
-                if (error.isNotBlank()) Text(error, color = Red, fontSize = 12.sp)
+                if (error.isNotBlank()) Text(error, color = Danger, fontSize = 12.sp)
             }
         },
         confirmButton = { TextButton(onClick = {
@@ -1332,29 +2272,39 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
 
 @Composable
 private fun NumericField(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier) {
-    OutlinedTextField(value, onChange, label = { Text(label, fontSize = 11.sp) }, modifier = modifier,
-        singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+    OutlinedTextField(value, onChange, label = { Text(label, fontSize = 14.sp) }, modifier = modifier,
+        shape = MaterialTheme.shapes.small, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
 }
 
-@Composable
-private fun MetricRow(label1: String, value1: String, label2: String, value2: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Column { Text(label1, color = Muted, fontSize = 11.sp); Text(value1, color = Ink, fontSize = 12.sp) }
-        Column { Text(label2, color = Muted, fontSize = 11.sp); Text(value2, color = Ink, fontSize = 12.sp) }
-    }
+private class MapViewport {
+    val zoom = mutableStateOf(1f)
+    val pan = mutableStateOf(androidx.compose.ui.geometry.Offset.Zero)
+    var lastFitRequest: Int? = null
 }
 
 @Composable
 private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, Position>, names: Map<String, String>,
-                            states: Map<String, DeviceState>, fitRequest: Int, modifier: Modifier = Modifier) {
+                            states: Map<String, DeviceState>, fitRequest: Int, modifier: Modifier = Modifier, viewport: MapViewport? = null) {
+    val ink = Ink
+    val muted = Muted
+    val green = Positive
+    val cyan = Accent
+    val axisX = Danger
+    val axisY = Positive
+    val grid = Grid
+    val mapSurface = androidx.compose.material3.MaterialTheme.colorScheme.surface
     val anchors = devices.filter { it.role == "anchor" }
     val points = anchors.map { it.x to it.y } + positions.values.map { it.x to it.y }
     if (points.isEmpty()) return
-    var zoom by remember { mutableStateOf(1f) }
-    var pan by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    val view = viewport ?: remember { MapViewport() }
+    var zoom by view.zoom
+    var pan by view.pan
     LaunchedEffect(fitRequest) {
-        zoom = 1f
-        pan = androidx.compose.ui.geometry.Offset.Zero
+        if (view.lastFitRequest != fitRequest) {
+            zoom = 1f
+            pan = androidx.compose.ui.geometry.Offset.Zero
+            view.lastFitRequest = fitRequest
+        }
     }
     val gestures = Modifier
         .pointerInput(Unit) {
@@ -1372,7 +2322,7 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
                 pan = androidx.compose.ui.geometry.Offset.Zero
             })
         }
-    Canvas(modifier.background(Color(0xFFF9FBFC)).then(gestures)) {
+    Canvas(modifier.background(mapSurface).semantics { contentDescription = "Localization map. ${anchors.size} anchors and ${positions.size} located tags. Coordinates in meters. Pinch to zoom, drag to pan, double tap to fit." }.then(gestures)) {
         val margin = 32f
         val topMargin = 20f
         var minX = points.minOf { it.first }; var maxX = points.maxOf { it.first }
@@ -1410,7 +2360,7 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
         var gx = ceil(visibleMinX / step) * step
         while (gx <= visibleMaxX) {
             val x = screen(gx, 0.0).x
-            drawLine(Color(0xFFCBD9DF), androidx.compose.ui.geometry.Offset(x, 0f),
+            drawLine(grid, androidx.compose.ui.geometry.Offset(x, 0f),
                 androidx.compose.ui.geometry.Offset(x, size.height), 1f)
             gx += step
         }
@@ -1419,47 +2369,74 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
         var gy = ceil(visibleMinY / step) * step
         while (gy <= visibleMaxY) {
             val y = screen(0.0, gy).y
-            drawLine(Color(0xFFCBD9DF), androidx.compose.ui.geometry.Offset(0f, y),
+            drawLine(grid, androidx.compose.ui.geometry.Offset(0f, y),
                 androidx.compose.ui.geometry.Offset(size.width, y), 1f)
             gy += step
+        }
+        drawIntoCanvas { canvas ->
+            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = muted.toArgb(); textSize = 11.sp.toPx()
+                typeface = android.graphics.Typeface.MONOSPACE
+            }
+            val paper = android.graphics.Paint().apply { color = mapSurface.toArgb() }
+            fun tick(label: String, x: Float, baseline: Float) {
+                val width = paint.measureText(label)
+                canvas.nativeCanvas.drawRect(x-2, baseline+paint.fontMetrics.ascent-2,
+                    x+width+2, baseline+paint.fontMetrics.descent+2, paper)
+                canvas.nativeCanvas.drawText(label,x,baseline,paint)
+            }
+            var xTick = ceil(visibleMinX / step) * step
+            while (xTick <= visibleMaxX) {
+                val x = screen(xTick, 0.0).x
+                if (x > 40.dp.toPx() && x < size.width - 40.dp.toPx())
+                    tick(formatAxisTick(xTick), x, size.height - 4.dp.toPx())
+                xTick += step * 2
+            }
+            var yTick = ceil(visibleMinY / step) * step
+            while (yTick <= visibleMaxY) {
+                val y = screen(0.0, yTick).y
+                if (y > 24.dp.toPx() && y < size.height - 24.dp.toPx())
+                    tick(formatAxisTick(yTick), 4.dp.toPx(), y)
+                yTick += step * 2
+            }
         }
         val yAxisVisible = 0.0 in visibleMinX..visibleMaxX
         val xAxisVisible = 0.0 in visibleMinY..visibleMaxY
         val yAxisX = screen(0.0, centerY).x
         val xAxisY = screen(centerX, 0.0).y
-        val yAxisColor = Color(0x887A72C6)
-        val xAxisColor = Color(0x88739DB0)
+        val yAxisColor = axisY.copy(alpha = .8f)
+        val xAxisColor = axisX.copy(alpha = .8f)
         if (yAxisVisible) {
             drawLine(yAxisColor, androidx.compose.ui.geometry.Offset(yAxisX, margin),
-                androidx.compose.ui.geometry.Offset(yAxisX, size.height - margin), 1.75.dp.toPx())
+                androidx.compose.ui.geometry.Offset(yAxisX, size.height - margin), .75.dp.toPx())
         }
         if (xAxisVisible) {
             drawLine(xAxisColor, androidx.compose.ui.geometry.Offset(margin, xAxisY),
-                androidx.compose.ui.geometry.Offset(size.width - margin, xAxisY), 1.75.dp.toPx())
+                androidx.compose.ui.geometry.Offset(size.width - margin, xAxisY), .75.dp.toPx())
         }
         if (yAxisVisible || xAxisVisible) drawIntoCanvas { canvas ->
             val axisLabelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                textSize = 10.sp.toPx()
+                textSize = 13.sp.toPx()
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
             if (yAxisVisible) {
-                axisLabelPaint.color = yAxisColor.toArgb()
-                canvas.nativeCanvas.drawText("Y", yAxisX + 4.dp.toPx(), margin + 12.dp.toPx(), axisLabelPaint)
+                axisLabelPaint.color = axisY.toArgb()
+                canvas.nativeCanvas.drawText("Y (m)", yAxisX + 4.dp.toPx(), margin + 12.dp.toPx(), axisLabelPaint)
             }
             if (xAxisVisible) {
-                axisLabelPaint.color = xAxisColor.toArgb()
-                canvas.nativeCanvas.drawText("X", size.width - margin - 12.dp.toPx(), xAxisY - 4.dp.toPx(), axisLabelPaint)
+                axisLabelPaint.color = axisX.toArgb()
+                canvas.nativeCanvas.drawText("X (m)", size.width - margin - 40.dp.toPx(), xAxisY - 4.dp.toPx(), axisLabelPaint)
             }
         }
         drawIntoCanvas { canvas ->
             val nativeCanvas = canvas.nativeCanvas
             val labelPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                color = android.graphics.Color.rgb(7, 24, 34)
-                textSize = 10.sp.toPx()
+                color = ink.toArgb()
+                textSize = 13.sp.toPx()
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             }
             val backgroundPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                color = android.graphics.Color.WHITE
+                color = mapSurface.toArgb()
                 style = android.graphics.Paint.Style.FILL
             }
             val borderPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
@@ -1472,6 +2449,14 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
             val labelPaddingY = 3.dp.toPx()
             val labelGap = 4.dp.toPx()
             val placedLabels = mutableListOf<android.graphics.RectF>()
+            // Keep marker labels out of the axis-unit labels, including at the origin.
+            fun reserveAxisLabel(text: String, left: Float, baseline: Float) {
+                val padding = 4.dp.toPx()
+                placedLabels += android.graphics.RectF(left - padding, baseline + labelMetrics.ascent - padding,
+                    left + labelPaint.measureText(text) + padding, baseline + labelMetrics.descent + padding)
+            }
+            if (yAxisVisible) reserveAxisLabel("Y (m)", yAxisX + 4.dp.toPx(), margin + 12.dp.toPx())
+            if (xAxisVisible) reserveAxisLabel("X (m)", size.width - margin - 40.dp.toPx(), xAxisY - 4.dp.toPx())
 
             fun drawPointLabel(text: String, center: androidx.compose.ui.geometry.Offset, markerRadius: Float, accent: Int) {
                 val width = labelPaint.measureText(text) + labelPaddingX * 2
@@ -1507,44 +2492,40 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
                 borderPaint.color = accent
                 nativeCanvas.drawRoundRect(rect, 6.dp.toPx(), 6.dp.toPx(), backgroundPaint)
                 nativeCanvas.drawRoundRect(rect, 6.dp.toPx(), 6.dp.toPx(), borderPaint)
-                labelPaint.color = android.graphics.Color.rgb(7, 24, 34)
+                labelPaint.color = ink.toArgb()
                 nativeCanvas.drawText(text, left + labelPaddingX, top + labelPaddingY - labelMetrics.ascent, labelPaint)
             }
 
             positions.forEach { (tag, p) ->
-                p.anchors.forEach { id -> anchors.firstOrNull { it.mac == id }?.let { drawLine(Color(0xFFACD9DF), screen(it.x, it.y), screen(p.x, p.y), 1.5f) } }
+                p.anchors.forEach { id -> anchors.firstOrNull { it.mac == id }?.let { drawLine(cyan.copy(alpha = .28f), screen(it.x, it.y), screen(p.x, p.y), 1.5f) } }
             }
             anchors.forEachIndexed { i, a ->
-                val center = screen(a.x, a.y); val color = if (states[a.key]?.online == true) Green else Muted
+                val center = screen(a.x, a.y); val color = if (states[a.key]?.online == true) green else muted
                 val tri = Path().apply {
-                    moveTo(center.x, center.y - 20)
-                    lineTo(center.x - 18, center.y + 16)
-                    lineTo(center.x + 18, center.y + 16)
+                    moveTo(center.x, center.y - 8.dp.toPx())
+                    lineTo(center.x - 7.dp.toPx(), center.y + 6.dp.toPx())
+                    lineTo(center.x + 7.dp.toPx(), center.y + 6.dp.toPx())
                     close()
                 }
                 drawPath(tri, color)
-                drawPath(tri, Color.White, style = Stroke(3f))
-                drawPath(tri, Ink, style = Stroke(1.5f))
-                drawPointLabel("${names[a.key] ?: "A${i + 1}"} ${a.x.fmt()}, ${a.y.fmt()}", center, 20f,
-                    if (states[a.key]?.online == true) android.graphics.Color.rgb(19, 139, 91) else android.graphics.Color.rgb(95, 117, 128))
+                drawPath(tri, mapSurface, style = Stroke(3f))
+                drawPath(tri, ink, style = Stroke(1.5f))
+                drawPointLabel("${names[a.key] ?: "A${i + 1}"} ${a.x.fmt()}, ${a.y.fmt()}", center, 8.dp.toPx(),
+                    if (states[a.key]?.online == true) green.toArgb() else muted.toArgb())
             }
             positions.forEach { (tag, p) ->
                 val center = screen(p.x, p.y)
-                drawCircle(Color(0x558CD0DB), max(7f, (p.error * scale).toFloat()), center, style = Stroke(2f))
-                drawCircle(Cyan, 11f, center)
-                drawCircle(Color.White, 11f, center, style = Stroke(2.5f))
-                drawCircle(Ink, 11f, center, style = Stroke(1f))
-                drawCircle(Color.White, 3f, center)
-                drawPointLabel("${names[tag] ?: "T"} ${p.x.fmt()}, ${p.y.fmt()}", center, 11f, android.graphics.Color.rgb(0, 127, 159))
+                drawCircle(cyan.copy(alpha = .35f), max(7f, (p.error * scale).toFloat()), center, style = Stroke(2f))
+                drawCircle(cyan, 5.dp.toPx(), center)
+                drawCircle(mapSurface, 5.dp.toPx(), center, style = Stroke(2.5f))
+                drawCircle(ink, 5.dp.toPx(), center, style = Stroke(1f))
+                drawCircle(mapSurface, 1.5.dp.toPx(), center)
+                drawPointLabel("${names[tag] ?: "T"} ${p.x.fmt()}, ${p.y.fmt()}", center, 5.dp.toPx(), cyan.toArgb())
             }
         }
     }
 }
 
-private fun vector(sample: JSONObject, field: String): String {
-    val values = sample.optJSONArray(field) ?: return "—"
-    return (0 until values.length()).joinToString("  ") { values.optDouble(it).fmt() }
-}
 private fun formatAxisTick(value: Double): String = when {
     kotlin.math.abs(value) >= 100 -> String.format(Locale.US, "%.0f", value)
     kotlin.math.abs(value) >= 10 -> String.format(Locale.US, "%.1f", value).trimEnd('0').trimEnd('.')

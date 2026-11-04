@@ -57,16 +57,21 @@ internal class CsvSessionStore(
 
     @Synchronized
     @Throws(IOException::class)
-    fun exportCsv(output: OutputStream): CsvExportSummary {
+    fun exportCsv(output: OutputStream, startingAtRecord: Int = 0): CsvExportSummary {
         if (!file.isFile || recordCount == 0) throw IOException("No CSV records are available")
+        if (startingAtRecord !in 0..recordCount) throw IOException("Invalid CSV recording start position")
 
         val fields = linkedSetOf<String>()
         var rowsFound = 0
+        var selectedRows = 0
+        var index = 0
         var firstReceivedAt: String? = null
         var lastReceivedAt: String? = null
         var missedSamples = 0L
         readRows { row ->
             rowsFound++
+            if (index++ < startingAtRecord) return@readRows
+            selectedRows++
             val keys = row.keys()
             while (keys.hasNext()) fields.add(keys.next())
             val receivedAt = row.optString("received_at_utc").takeIf(String::isNotBlank)
@@ -77,6 +82,7 @@ internal class CsvSessionStore(
         if (rowsFound != recordCount) {
             throw IOException("CSV session integrity check failed: expected $recordCount rows, found $rowsFound")
         }
+        if (selectedRows == 0) throw IOException("No CSV records are available for this recording")
 
         val orderedFields = PRIORITY_FIELDS.filter(fields::contains) +
             fields.filterNot(PRIORITY_FIELDS.toSet()::contains).sorted()
@@ -84,7 +90,9 @@ internal class CsvSessionStore(
             writer.write('\uFEFF'.code)
             writer.write(orderedFields.joinToString(",", transform = ::csvEscape))
             writer.write("\r\n")
+            index = 0
             readRows { row ->
+                if (index++ < startingAtRecord) return@readRows
                 writer.write(orderedFields.joinToString(",") { key ->
                     val value = row.opt(key)
                     csvEscape(if (value == null || value === JSONObject.NULL) "" else value.toString())
@@ -92,7 +100,7 @@ internal class CsvSessionStore(
                 writer.write("\r\n")
             }
         }
-        return CsvExportSummary(rowsFound, firstReceivedAt, lastReceivedAt, missedSamples)
+        return CsvExportSummary(selectedRows, firstReceivedAt, lastReceivedAt, missedSamples)
     }
 
     private inline fun readRows(action: (JSONObject) -> Unit) {
