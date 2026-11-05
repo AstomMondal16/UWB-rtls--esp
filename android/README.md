@@ -78,8 +78,10 @@ The app communicates with device HTTP endpoints such as `/api/telemetry`,
 hotspot on, enter its exact network name and password in **Configure Wi-Fi via
 Bluetooth**, and provision each device. The phone and devices then share that
 local network; use **Scan network** to find the devices. HTTP and discovery
-need no internet connection. For HTTPS instead, enable it in menuconfig and
-enter the device's certificate fingerprint in its settings; see
+need no internet connection. TLS-capable firmware advertises HTTPS; Android
+remembers that requirement without falling back after errors. For older TLS
+firmware, select Require HTTPS or enter its certificate fingerprint in the
+device editor. Self-signed certificates need a pin and matching IP/DNS SAN; see
 [`TLS_SETUP.md`](../components/telemetry/TLS_SETUP.md).
 Wi-Fi provisioning no longer asks for the 64-character API key. Its BLE
 Security 1 session encrypts traffic without a proof-of-possession check, so a
@@ -101,7 +103,11 @@ The dashboard API has no client API key; use it only on a trusted local network.
   session file with a 512 MiB limit and retains prior records across stops.
   Choose **Export CSV** to save a streaming export. The export reports its row
   count, capture time range, and missed telemetry sequence numbers; corrupted
-  session rows fail the export instead of being omitted.
+  session rows fail the export instead of being omitted. UWB, IMU and observable
+  battery updates are recorded independently for all configured devices.
+  Exports include solved tag positions and freeze their end row at Stop.
+- **Tag trails:** Recent valid positions form a separate bounded trail per tag;
+  disconnects, invalid positions and long gaps start new segments.
 - **Calibrate:** Follow the in-app calibration prompt with a measured distance
   between the devices being calibrated.
 
@@ -160,3 +166,6 @@ phone.
   and telemetry data models.
 - `app/src/main/AndroidManifest.xml` — app identity, network permissions, and
   local HTTP setting.
+
+See [HTTPS, CSV and trail details](TELEMETRY_CHANGES.md) for the endpoint inventory,
+CSV schema/units, firmware delivery limits and verification results.

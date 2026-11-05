@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include "esp_check.h"
 #include "esp_http_server.h"
@@ -19,9 +20,7 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
-#ifdef CONFIG_UWB_CIR_ENABLE
 #include "dw1000.h"
-#endif
 
 #define DISCOVERY_PORT 4210
 #define TELEMETRY_MAX_PEERS 8
@@ -50,6 +49,14 @@ typedef struct {
     uint8_t peer_count;
 } shared_state_t;
 
+typedef struct {
+    bool streaming;
+    uint32_t sensing_interval_ms;
+    uint32_t send_interval_ms;
+    uint32_t antenna_delay;
+    char role[8];
+} control_values_t;
+
 static const char *TAG = "telemetry";
 static QueueHandle_t samples;
 static TaskHandle_t collector_task_handle;
@@ -58,6 +65,8 @@ static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static shared_state_t state = {.streaming = true};
 static char device_mac[18];
 static char device_ip[16];
+static bool clock_synchronized;
+static bool use_phone_clock;
 static telemetry_control_callback_t control_callback;
 #ifdef CONFIG_UWB_TLS_ENABLE
 extern const uint8_t device_cert_pem_start[] asm("_binary_device_cert_pem_start");
@@ -152,30 +161,112 @@ void telemetry_update_battery(float voltage, float percent)
     portEXIT_CRITICAL(&state_lock);
 }
 
-static esp_err_t telemetry_handler(httpd_req_t *request)
+bool telemetry_read_snapshot(telemetry_sample_t *sample, char role[8])
 {
-    shared_state_t snapshot;
+    if (!sample || !role) return false;
     portENTER_CRITICAL(&state_lock);
-    snapshot = state;
+    *sample = state.latest;
+    sample->imu_valid = state.imu_valid;
+    memcpy(sample->accel, state.imu_accel, sizeof(sample->accel));
+    memcpy(sample->gyro, state.imu_gyro, sizeof(sample->gyro));
+    sample->temperature_c = state.imu_temperature_c;
+    sample->battery_valid = state.battery_valid;
+    sample->battery_voltage = state.battery_voltage;
+    sample->battery_percent = state.battery_percent;
+    strlcpy(role, state.role, 8);
+    bool valid = state.valid;
     portEXIT_CRITICAL(&state_lock);
+    return valid;
+}
+
+int64_t telemetry_clock_unix_ms(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    bool ready = clock_synchronized;
+    portEXIT_CRITICAL(&state_lock);
+    struct timeval now;
+    if (!ready || gettimeofday(&now, NULL) != 0 || now.tv_sec < 1577836800 || now.tv_sec >= 4102444800LL) return 0;
+    return (int64_t)now.tv_sec * 1000 + now.tv_usec / 1000;
+}
+
+/* A single bounded decimal UTC epoch value; no extra keys or trailing content. */
+static bool parse_clock_update(const char *body, int64_t *epoch_ms)
+{
+    const char *p = body + strspn(body, " \t\r\n");
+    if (*p++ != '{') return false;
+    p += strspn(p, " \t\r\n");
+    if (strncmp(p, "\"unix_ms\"", 9)) return false;
+    p += 9;
+    p += strspn(p, " \t\r\n");
+    if (*p++ != ':') return false;
+    p += strspn(p, " \t\r\n");
+    if (*p < '1' || *p > '9') return false;
+    errno = 0;
+    char *end;
+    unsigned long long value = strtoull(p, &end, 10);
+    if (errno || value < 1577836800000ULL || value >= 4102444800000ULL) return false;
+    p = end + strspn(end, " \t\r\n");
+    if (*p++ != '}' || p[strspn(p, " \t\r\n")]) return false;
+    *epoch_ms = (int64_t)value;
+    return true;
+}
+
+static esp_err_t clock_handler(httpd_req_t *request)
+{
+    if (!use_phone_clock)
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "clock is synchronized by API/SNTP");
+    char content_type[64], body[64];
+    if (httpd_req_get_hdr_value_str(request, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
+        strncasecmp(content_type, "application/json", 16) || (content_type[16] && content_type[16] != ';') ||
+        request->content_len <= 0 || request->content_len >= sizeof(body))
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid clock request");
+    size_t used = 0;
+    while (used < request->content_len) {
+        int count = httpd_req_recv(request, body + used, request->content_len - used);
+        if (count <= 0) return ESP_FAIL;
+        used += (size_t)count;
+    }
+    body[used] = '\0';
+    int64_t ms;
+    if (strlen(body) != used || !parse_clock_update(body, &ms))
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid UTC unix_ms");
+    struct timeval utc = {.tv_sec = ms / 1000, .tv_usec = (ms % 1000) * 1000};
+    if (settimeofday(&utc, NULL) != 0)
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "could not set clock");
+    portENTER_CRITICAL(&state_lock);
+    clock_synchronized = true;
+    portEXIT_CRITICAL(&state_lock);
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(request, "{\"ok\":true}");
+}
+
+static esp_err_t send_telemetry_snapshot(httpd_req_t *request, const shared_state_t *snapshot)
+{
 
     char peer[18] = "00:00:00:00:00:00";
-    if (snapshot.valid) {
+    if (snapshot->valid) {
         snprintf(peer, sizeof(peer), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 snapshot.latest.peer_id[0], snapshot.latest.peer_id[1],
-                 snapshot.latest.peer_id[2], snapshot.latest.peer_id[3],
-                 snapshot.latest.peer_id[4], snapshot.latest.peer_id[5]);
+                 snapshot->latest.peer_id[0], snapshot->latest.peer_id[1],
+                 snapshot->latest.peer_id[2], snapshot->latest.peer_id[3],
+                 snapshot->latest.peer_id[4], snapshot->latest.peer_id[5]);
     }
-    uint64_t age_ms = snapshot.valid
-        ? (uint64_t)(esp_timer_get_time() / 1000) - snapshot.latest.timestamp_ms
+    uint64_t age_ms = snapshot->valid
+        ? (uint64_t)(esp_timer_get_time() / 1000) - snapshot->latest.timestamp_ms
         : 0;
     char rx_power[24] = "null";
-    if (isfinite(snapshot.latest.rx_power_dbm))
-        snprintf(rx_power, sizeof(rx_power), "%.2f", snapshot.latest.rx_power_dbm);
+    if (isfinite(snapshot->latest.rx_power_dbm))
+        snprintf(rx_power, sizeof(rx_power), "%.2f", snapshot->latest.rx_power_dbm);
+#ifdef CONFIG_UWB_TIME_SOURCE_API
+    const char *configured_clock_source = "api";
+#else
+    const char *configured_clock_source = "phone";
+#endif
+    const char *clock_source = use_phone_clock ? "phone" : "api";
     char json[2600];
     int length = snprintf(
         json, sizeof(json),
-        "{\"valid\":%s,\"streaming\":%s,\"sequence\":%" PRIu32
+        "{\"configured_clock_source\":\"%s\",\"clock_source\":\"%s\",\"device_time_unix_ms\":%" PRId64 ",\"valid\":%s,\"streaming\":%s,\"sequence\":%" PRIu32
         ",\"dropped\":%" PRIu32 ",\"timestamp_ms\":%" PRIu64
         ",\"age_ms\":%" PRIu64 ",\"mac\":\"%s\",\"ip\":\"%s\""
         ",\"role\":\"%s\",\"peer\":\"%s\",\"distance_m\":%.4f"
@@ -188,22 +279,22 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
         ",\"send_interval_ms\":%" PRIu32
         ",\"antenna_delay\":%" PRIu32
         ",\"battery_voltage\":%.3f,\"battery_percent\":%.1f",
-        snapshot.valid ? "true" : "false",
-        snapshot.streaming ? "true" : "false", snapshot.sequence,
-        snapshot.dropped, snapshot.latest.timestamp_ms, age_ms, device_mac,
-        device_ip, snapshot.role, peer, snapshot.latest.distance_m,
-        snapshot.latest.speed_mps, rx_power,
-        snapshot.imu_enabled ? "true" : "false",
-        snapshot.imu_valid ? "true" : "false", snapshot.imu_sequence,
-        snapshot.imu_timestamp_ms,
-        snapshot.imu_accel[0], snapshot.imu_accel[1],
-        snapshot.imu_accel[2], snapshot.imu_gyro[0],
-        snapshot.imu_gyro[1], snapshot.imu_gyro[2],
-        snapshot.imu_temperature_c,
-        snapshot.battery_valid ? "true" : "false",
-        snapshot.sensing_interval_ms, snapshot.send_interval_ms,
-        snapshot.antenna_delay,
-        snapshot.battery_voltage, snapshot.battery_percent);
+        configured_clock_source, clock_source, telemetry_clock_unix_ms(), snapshot->valid ? "true" : "false",
+        snapshot->streaming ? "true" : "false", snapshot->sequence,
+        snapshot->dropped, snapshot->latest.timestamp_ms, age_ms, device_mac,
+        device_ip, snapshot->role, peer, snapshot->latest.distance_m,
+        snapshot->latest.speed_mps, rx_power,
+        snapshot->imu_enabled ? "true" : "false",
+        snapshot->imu_valid ? "true" : "false", snapshot->imu_sequence,
+        snapshot->imu_timestamp_ms,
+        snapshot->imu_accel[0], snapshot->imu_accel[1],
+        snapshot->imu_accel[2], snapshot->imu_gyro[0],
+        snapshot->imu_gyro[1], snapshot->imu_gyro[2],
+        snapshot->imu_temperature_c,
+        snapshot->battery_valid ? "true" : "false",
+        snapshot->sensing_interval_ms, snapshot->send_interval_ms,
+        snapshot->antenna_delay,
+        snapshot->battery_voltage, snapshot->battery_percent);
     if (length < 0 || (size_t)length >= sizeof(json))
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "telemetry encoding failed");
@@ -214,8 +305,8 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
                                    "telemetry encoding failed");
     used += (size_t)length;
     uint64_t now = esp_timer_get_time() / 1000;
-    for (unsigned i = 0; i < snapshot.peer_count; ++i) {
-        const telemetry_sample_t *peer_sample = &snapshot.peer_latest[i];
+    for (unsigned i = 0; i < snapshot->peer_count; ++i) {
+        const telemetry_sample_t *peer_sample = &snapshot->peer_latest[i];
         char peer_id[18];
         snprintf(peer_id, sizeof(peer_id), "%02X:%02X:%02X:%02X:%02X:%02X",
                  peer_sample->peer_id[0], peer_sample->peer_id[1],
@@ -245,13 +336,48 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
     used += (size_t)length;
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    return httpd_resp_send(request, json, used);
+    char *raw = telemetry_encode_uwb_raw_json(&snapshot->latest.uwb_raw, false);
+    if (!raw) return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "UWB encoding failed");
+    char *cir = telemetry_copy_cir_json(NULL);
+    if (!cir) {
+        free(raw);
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "CIR encoding failed");
+    }
+    const size_t capacity = used + strlen(raw) + strlen(cir) + 96;
+    char *combined = malloc(capacity);
+    if (!combined) {
+        free(raw);
+        free(cir);
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "no telemetry buffer");
+    }
+    int encoded = snprintf(combined, capacity, "%.*s,\"tx_power\":\"0x%08" PRIX32 "\",\"uwb_raw\":%s,\"cir\":%s}",
+                           (int)used - 1, json, DW1000_TX_POWER_SETTING, raw, cir);
+    free(raw);
+    free(cir);
+    esp_err_t err = encoded < 0 || (size_t)encoded >= capacity
+        ? httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "telemetry encoding failed")
+        : httpd_resp_send(request, combined, encoded);
+    free(combined);
+    return err;
+}
+
+static esp_err_t telemetry_handler(httpd_req_t *request)
+{
+    // Raw exchange bytes enlarge the history; keep the HTTP stack bounded.
+    shared_state_t *snapshot = malloc(sizeof(*snapshot));
+    if (!snapshot) return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "no snapshot buffer");
+    portENTER_CRITICAL(&state_lock);
+    *snapshot = state;
+    portEXIT_CRITICAL(&state_lock);
+    esp_err_t err = send_telemetry_snapshot(request, snapshot);
+    free(snapshot);
+    return err;
 }
 
 /* This endpoint accepts only a flat object of these five literal keys, with
  * boolean, unsigned decimal integer, or role values. No nesting or escapes.
  * Consume the entire body; reject duplicates and unknown fields. */
-static bool parse_control(const char *body, shared_state_t *updated)
+static bool parse_control(const char *body, control_values_t *updated)
 {
     static const char *const names[] = {
         "\"streaming\"", "\"sensing_interval_ms\"", "\"send_interval_ms\"",
@@ -339,9 +465,13 @@ static esp_err_t control_handler(httpd_req_t *request)
     body[received] = '\0';
     if (strlen(body) != received)
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid control body");
-    shared_state_t updated;
+    control_values_t updated;
     portENTER_CRITICAL(&state_lock);
-    updated = state;
+    updated.streaming = state.streaming;
+    updated.sensing_interval_ms = state.sensing_interval_ms;
+    updated.send_interval_ms = state.send_interval_ms;
+    updated.antenna_delay = state.antenna_delay;
+    memcpy(updated.role, state.role, sizeof(updated.role));
     portEXIT_CRITICAL(&state_lock);
     if (!parse_control(body, &updated))
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
@@ -371,21 +501,20 @@ static esp_err_t control_handler(httpd_req_t *request)
     return httpd_resp_sendstr(request, response);
 }
 
-static esp_err_t cir_handler(httpd_req_t *request)
+char *telemetry_copy_cir_json(bool *capture_valid)
 {
-    httpd_resp_set_type(request, "application/json");
-    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    if (capture_valid) *capture_valid = false;
 #ifndef CONFIG_UWB_CIR_ENABLE
-    return httpd_resp_sendstr(request, "{\"enabled\":false,\"valid\":false}");
+    return strdup("{\"enabled\":false,\"valid\":false}");
 #else
     /* A full CIR is larger than the HTTP task's spare stack. Network sends
      * use a private copy and never hold the radio task's snapshot lock. */
     dw1000_cir_t *snapshot = malloc(sizeof(*snapshot));
     if (!snapshot)
-        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "no CIR buffer");
+        return NULL;
     if (!dw1000_get_cir(snapshot)) {
         free(snapshot);
-        return httpd_resp_sendstr(request, "{\"enabled\":true,\"valid\":false}");
+        return strdup("{\"enabled\":true,\"valid\":false}");
     }
     /* Encode on CPU0 and send one bounded response, instead of many tiny
      * chunked socket writes. On dual-core chips the radio's CPU1 never
@@ -394,7 +523,7 @@ static esp_err_t cir_handler(httpd_req_t *request)
     char *json = malloc(capacity);
     if (!json) {
         free(snapshot);
-        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "no CIR JSON buffer");
+        return NULL;
     }
     int length = snprintf(json, capacity,
         "{\"enabled\":true,\"valid\":true,\"sequence\":%" PRIu32
@@ -412,7 +541,7 @@ static esp_err_t cir_handler(httpd_req_t *request)
     if (length < 0 || (size_t)length >= capacity) {
         free(json);
         free(snapshot);
-        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "CIR encoding failed");
+        return NULL;
     }
     size_t used = length;
     for (unsigned i = 0; i < CONFIG_UWB_CIR_SAMPLES; ++i) {
@@ -421,7 +550,7 @@ static esp_err_t cir_handler(httpd_req_t *request)
         if (length < 0 || (size_t)length >= capacity - used) {
             free(json);
             free(snapshot);
-            return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "CIR encoding failed");
+            return NULL;
         }
         used += length;
     }
@@ -429,13 +558,23 @@ static esp_err_t cir_handler(httpd_req_t *request)
     /* capacity includes the closing delimiters and NUL at worst-case width. */
     if (capacity - used < 3) {
         free(json);
-        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "CIR encoding failed");
+        return NULL;
     }
     memcpy(json + used, "]}", 3);
-    esp_err_t err = httpd_resp_send(request, json, used + 2);
+    if (capture_valid) *capture_valid = true;
+    return json;
+#endif
+}
+
+static esp_err_t cir_handler(httpd_req_t *request)
+{
+    char *json = telemetry_copy_cir_json(NULL);
+    if (!json) return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "CIR encoding failed");
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_send(request, json, HTTPD_RESP_USE_STRLEN);
     free(json);
     return err;
-#endif
 }
 
 static void discovery_task(void *argument)
@@ -477,8 +616,14 @@ static void discovery_task(void *argument)
         char response[128];
         int response_length = snprintf(
             response, sizeof(response),
-            "{\"mac\":\"%s\",\"ip\":\"%s\",\"role\":\"%s\"}",
-            device_mac, device_ip, role);
+            "{\"mac\":\"%s\",\"ip\":\"%s\",\"role\":\"%s\",\"api_scheme\":\"%s\"}",
+            device_mac, device_ip, role,
+#ifdef CONFIG_UWB_TLS_ENABLE
+            "https"
+#else
+            "http"
+#endif
+        );
         sendto(socket_fd, response, response_length, 0,
                (struct sockaddr *)&source, source_length);
     }
@@ -506,10 +651,12 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
     state.send_interval_ms = config->send_interval_ms;
     state.antenna_delay = config->antenna_delay;
     control_callback = config->on_control;
+    clock_synchronized = config->clock_synchronized;
+    use_phone_clock = !config->clock_synchronized;
     samples = xQueueCreate(config->buffer_length, sizeof(telemetry_sample_t));
     if (!samples) return ESP_ERR_NO_MEM;
 
-    if (xTaskCreatePinnedToCore(collector_task, "telemetry_buffer", 3072, NULL,
+    if (xTaskCreatePinnedToCore(collector_task, "telemetry_buffer", 4096, NULL,
                                 4, &collector_task_handle, network_core()) != pdPASS) {
         collector_task_handle = NULL;
         vQueueDelete(samples);
@@ -557,11 +704,17 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
         .method = HTTP_GET,
         .handler = cir_handler,
     };
+    const httpd_uri_t clock_uri = {
+        .uri = "/api/time",
+        .method = HTTP_POST,
+        .handler = clock_handler,
+    };
     err = httpd_register_uri_handler(api_server, &telemetry_uri);
     if (err != ESP_OK) goto fail;
     err = httpd_register_uri_handler(api_server, &control_uri);
     if (err != ESP_OK) goto fail;
     err = httpd_register_uri_handler(api_server, &cir_uri);
+    if (err == ESP_OK) err = httpd_register_uri_handler(api_server, &clock_uri);
     if (err != ESP_OK) goto fail;
     if (xTaskCreatePinnedToCore(discovery_task, "mac_discovery", 3072, NULL,
                                 3, NULL, network_core()) != pdPASS)

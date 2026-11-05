@@ -19,9 +19,9 @@ data class DeviceRecord(
 }
 
 data class FoundDevice(val mac: String, val ip: String, val role: String,
-                       val lastSeenAtMs: Long = System.currentTimeMillis())
+                       val lastSeenAtMs: Long = System.currentTimeMillis(), val apiScheme: String = "")
 data class Position(val x: Double, val y: Double, val z: Double, val error: Double, val anchors: List<String>)
-data class RangeReading(val distance: Double, val rxPower: Double?, val timeMs: Long)
+data class RangeReading(val distance: Double, val rxPower: Double?, val timeMs: Long, val measurementId: String = "")
 data class DeviceState(val online: Boolean, val sample: JSONObject, val error: String = "")
 
 data class DashboardSnapshot(
@@ -35,7 +35,8 @@ data class DashboardSnapshot(
     val calibrationProgress: String = "",
     val streamingPending: Boolean = false,
     val recordingStartCount: Int = 0,
-    val recordingStartedAtMs: Long? = null
+    val recordingStartedAtMs: Long? = null,
+    val trails: Map<String, List<TrailPoint>> = emptyMap()
 )
 
 fun normalizeMac(value: String): String = value.trim().replace("-", ":").uppercase()
@@ -101,7 +102,7 @@ fun solvePositions(devices: List<DeviceRecord>, ranges: Map<Pair<String, String>
         val used = mutableListOf<String>()
         val measurements = ranges.mapNotNull { (pair, reading) ->
             val anchor = anchors[pair.first] ?: return@mapNotNull null
-            if (pair.second != tag || nowMs - reading.timeMs > 3000) return@mapNotNull null
+            if (pair.second != tag || nowMs - reading.timeMs > 3000 || !reading.distance.isFinite() || reading.distance <= 0) return@mapNotNull null
             val dz = anchor.z - tagZ
             val horizontalSq = reading.distance * reading.distance - dz * dz
             if (horizontalSq <= 0) return@mapNotNull null
@@ -109,7 +110,7 @@ fun solvePositions(devices: List<DeviceRecord>, ranges: Map<Pair<String, String>
             Triple(anchor.x, anchor.y, sqrt(horizontalSq))
         }
         val solved = trilaterate2d(measurements)
-        if (solved != null) result[tag] = Position(solved.first, solved.second, tagZ, solved.third, used)
+        if (solved != null && listOf(solved.first, solved.second, solved.third).all(Double::isFinite)) result[tag] = Position(solved.first, solved.second, tagZ, solved.third, used)
     }
     return result
 }

@@ -13,7 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define FRAME_LEN       98
+#define FRAME_LEN       UWB_RAW_FRAME_BYTES
 #define SEQUENCE_OFFSET 86
 #define RESERVED_OFFSET 90
 #define RESERVED_LEN    8
@@ -48,6 +48,7 @@ typedef struct {
 
 typedef struct {
     uwb_ranging_config_t config;
+    uwb_raw_t raw;
     uint8_t eui[8];
     uint8_t short_address[2];
     uint8_t sequence;
@@ -470,10 +471,18 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         update_peer_id(ctx, frame, length);
         peer_active(ctx);
 
+        memset(&ctx->raw, 0, sizeof(ctx->raw));
+        ctx->raw.peer_rx_power_dbm = NAN;
+        ctx->raw.local_rx_power_dbm = NAN;
+        memcpy(ctx->raw.frames[0], frame, length);
+        ctx->raw.frame_lengths[0] = (uint8_t)length;
         uint64_t ack_at = dw1000_future_tx_time(reply_us);
         uint64_t ack_tx = 0;
         make_short_header(ctx, frame, ctx->peer_short, MSG_POLL_ACK);
         if (!ack_at || transmit_frame(frame, ack_at, &ack_tx) != ESP_OK) continue;
+        memcpy(ctx->raw.frames[1], frame, FRAME_LEN);
+        ctx->raw.frame_lengths[1] = FRAME_LEN;
+        ctx->raw.tx_success_mask |= 1u << 1;
 
         uint64_t range_rx = 0;
         err = dw1000_receive(frame, sizeof(frame), &length, &range_rx, 150);
@@ -493,6 +502,18 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         float rx_power = dw1000_receive_power();
         if (!isfinite(distance) || tof < 0 || distance > 1000.0f) continue;
 
+        ctx->raw.valid = true;
+        ctx->raw.timestamp_valid_mask = 0x3f;
+        ctx->raw.expected_timestamp_mask = 1u << 4;
+        const uint64_t times[6] = {poll_tx, poll_rx, ack_tx, ack_rx, range_tx, range_rx};
+        memcpy(ctx->raw.timestamps, times, sizeof(times));
+        ctx->raw.tof_valid = true;
+        ctx->raw.tof_ticks = tof;
+        ctx->raw.distance_m = distance;
+        ctx->raw.local_rx_power_dbm = rx_power;
+        ctx->raw.rx_diagnostics_mask = dw1000_receive_power_inputs(&ctx->raw.cir_power, &ctx->raw.rx_frame_info);
+        memcpy(ctx->raw.frames[2], frame, length);
+        ctx->raw.frame_lengths[2] = (uint8_t)length;
         ctx->peer.range_m = distance;
         ctx->peer.rx_power_dbm = rx_power;
         peer_active(ctx);
@@ -500,14 +521,26 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         memcpy(frame + SHORT_MAC_LEN + 1, &distance, sizeof(distance));
         memcpy(frame + SHORT_MAC_LEN + 5, &rx_power, sizeof(rx_power));
         uint64_t report_at = dw1000_future_tx_time(ctx->config.reply_delay_us);
-        if (report_at) transmit_frame(frame, report_at, NULL);
+        if (report_at) {
+            esp_err_t report_error = transmit_frame(frame, report_at, NULL);
+            memcpy(ctx->raw.frames[3], frame, FRAME_LEN);
+            ctx->raw.frame_lengths[3] = FRAME_LEN;
+            if (report_error == ESP_OK) {
+                ctx->raw.tx_success_mask |= 1u << 3;
+                ctx->raw.timestamps[6] = dw1000_expected_tx_time(report_at);
+                ctx->raw.timestamp_valid_mask |= 1u << 6;
+                ctx->raw.expected_timestamp_mask |= 1u << 6;
+            }
+        }
 #ifdef CONFIG_UWB_CIR_ENABLE
         /* TX does not overwrite the last RX accumulator. Read after the reply
          * so CIR SPI traffic cannot make this exchange's delayed TX late. */
         esp_err_t cir_err = dw1000_capture_cir(ctx->peer.short_address, MSG_RANGE);
         if (cir_err != ESP_OK) ESP_LOGW(TAG, "CIR capture: %s", esp_err_to_name(cir_err));
 #endif
+        ctx->peer.raw = &ctx->raw;
         if (ctx->config.on_range) ctx->config.on_range(&ctx->peer);
+        ctx->peer.raw = NULL;
     }
 }
 
@@ -618,6 +651,10 @@ static void forget_inactive_anchors(ranging_context_t *ctx)
 
 static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
 {
+    memset(&ctx->raw, 0, sizeof(ctx->raw));
+    ctx->raw.source_is_tag = true;
+    ctx->raw.peer_rx_power_dbm = NAN;
+    ctx->raw.local_rx_power_dbm = NAN;
     const uint8_t broadcast[2] = {0xff, 0xff};
     make_short_header(ctx, frame, broadcast, MSG_POLL);
     frame[SHORT_MAC_LEN + 1] = 1;
@@ -625,6 +662,11 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     put_u16(frame + SHORT_MAC_LEN + 4, ctx->config.reply_delay_us);
     uint64_t poll_tx = 0;
     ESP_RETURN_ON_ERROR(transmit_frame(frame, 0, &poll_tx), TAG, "POLL transmit");
+    memcpy(ctx->raw.frames[0], frame, FRAME_LEN);
+    ctx->raw.frame_lengths[0] = FRAME_LEN;
+    ctx->raw.tx_success_mask |= 1u << 0;
+    ctx->raw.timestamps[0] = poll_tx;
+    ctx->raw.timestamp_valid_mask |= 1u << 0;
 
     size_t length = 0;
     uint64_t ack_rx = 0;
@@ -635,6 +677,10 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     if (!accept_sequence(frame, &ctx->last_sequence,
                          &ctx->has_sequence)) return ESP_ERR_INVALID_RESPONSE;
 
+    memcpy(ctx->raw.frames[1], frame, length);
+    ctx->raw.frame_lengths[1] = (uint8_t)length;
+    ctx->raw.timestamps[3] = ack_rx;
+    ctx->raw.timestamp_valid_mask |= 1u << 3;
     uint64_t range_at = dw1000_future_tx_time(ctx->config.reply_delay_us);
     if (!range_at) return ESP_FAIL;
     make_short_header(ctx, frame, broadcast, MSG_RANGE);
@@ -642,8 +688,14 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     memcpy(frame + SHORT_MAC_LEN + 2, ctx->peer_short, 2);
     put_u40(frame + SHORT_MAC_LEN + 4, poll_tx);
     put_u40(frame + SHORT_MAC_LEN + 9, ack_rx);
-    put_u40(frame + SHORT_MAC_LEN + 14, dw1000_expected_tx_time(range_at));
+    ctx->raw.timestamps[4] = dw1000_expected_tx_time(range_at);
+    put_u40(frame + SHORT_MAC_LEN + 14, ctx->raw.timestamps[4]);
     ESP_RETURN_ON_ERROR(transmit_frame(frame, range_at, NULL), TAG, "RANGE transmit");
+    memcpy(ctx->raw.frames[2], frame, FRAME_LEN);
+    ctx->raw.frame_lengths[2] = FRAME_LEN;
+    ctx->raw.tx_success_mask |= 1u << 2;
+    ctx->raw.timestamp_valid_mask |= 1u << 4;
+    ctx->raw.expected_timestamp_mask |= 1u << 4;
 
     err = dw1000_receive(frame, FRAME_LEN, &length, NULL, 150);
     if (err != ESP_OK || !valid_frame_length(length) ||
@@ -657,6 +709,15 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     if (!isfinite(distance) || distance < 0 || distance > 1000.0f ||
         isinf(rx_power) || (isfinite(rx_power) && (rx_power < -200 || rx_power > 0)))
         return ESP_ERR_INVALID_RESPONSE;
+    ctx->raw.valid = true;
+    ctx->raw.distance_m = distance;
+    ctx->raw.peer_rx_power_dbm = rx_power;
+    ctx->raw.local_rx_power_dbm = dw1000_receive_power();
+    ctx->raw.rx_diagnostics_mask = dw1000_receive_power_inputs(&ctx->raw.cir_power, &ctx->raw.rx_frame_info);
+    if (dw1000_read_receive_timestamp(&ctx->raw.timestamps[7]) == ESP_OK)
+        ctx->raw.timestamp_valid_mask |= 1u << 7;
+    memcpy(ctx->raw.frames[3], frame, length);
+    ctx->raw.frame_lengths[3] = (uint8_t)length;
     ctx->peer.range_m = distance;
     ctx->peer.rx_power_dbm = rx_power; /* NaN denotes unavailable diagnostics. */
     update_peer_id(ctx, frame, length);
@@ -665,7 +726,9 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     esp_err_t cir_err = dw1000_capture_cir(ctx->peer.short_address, MSG_RANGE_REPORT);
     if (cir_err != ESP_OK) ESP_LOGW(TAG, "CIR capture: %s", esp_err_to_name(cir_err));
 #endif
+    ctx->peer.raw = &ctx->raw;
     if (ctx->config.on_range) ctx->config.on_range(&ctx->peer);
+    ctx->peer.raw = NULL;
     return ESP_OK;
 }
 

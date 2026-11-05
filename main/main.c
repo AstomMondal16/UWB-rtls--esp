@@ -1,9 +1,14 @@
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "dw1000.h"
 #include <inttypes.h>
 #include <string.h>
+#include <time.h>
 #include "sdkconfig.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "time_sync.h"
 #include "esp_timer.h"
 #include "sensor_coordinator.h"
 #include "freertos/FreeRTOS.h"
@@ -26,9 +31,7 @@
 static const char *TAG = "UWB";
 static wifi_info_t network;
 static volatile bool wifi_connected = false;
-#define IMU_LOG_INTERVAL_US 1000000LL
 #define BATTERY_LOG_INTERVAL_MS 5000
-#define UWB_WAITING_LOG_INTERVAL_MS 2000
 #define RANGE_FILTER_COUNT 8
 typedef struct {
     bool used;
@@ -55,12 +58,6 @@ static uwb_ranging_role_t active_role = UWB_RANGING_TAG;
 static const char *role_name(uwb_ranging_role_t role)
 {
     return role == UWB_RANGING_ANCHOR ? "anchor" : "tag";
-}
-
-static void log_uwb_waiting(uwb_ranging_role_t role)
-{
-    ESP_LOGI(TAG, "%s running - waiting for ranging packet",
-             role == UWB_RANGING_ANCHOR ? "ANCHOR" : "TAG");
 }
 
 static void sensor_delay_with_checkpoint(uint32_t sensor, uint32_t delay_ms)
@@ -131,15 +128,6 @@ static void apply_dashboard_control(bool streaming, uint32_t sensing_interval_ms
 #ifdef CONFIG_UWB_MPU6050_ENABLE
 static mpu6050_handle_t imu;
 static i2c_master_bus_handle_t imu_bus;
-
-static void log_imu_reading(const mpu6050_data_t *data)
-{
-    ESP_LOGI(TAG, "IMU accel=[%+.3f,%+.3f,%+.3f] g "
-             "gyro=[%+.3f,%+.3f,%+.3f] dps temp=%.2f C",
-             data->accel_x, data->accel_y, data->accel_z,
-             data->gyro_x, data->gyro_y, data->gyro_z,
-             data->temperature);
-}
 
 static esp_err_t init_imu(void)
 {
@@ -216,12 +204,7 @@ static void imu_sampling_task(void *argument)
             const float accel[3] = {data.accel_x, data.accel_y, data.accel_z};
             const float gyro[3] = {data.gyro_x, data.gyro_y, data.gyro_z};
             telemetry_update_imu(true, accel, gyro, data.temperature);
-            static int64_t last_imu_log_us;
-            int64_t now_us = esp_timer_get_time();
-            if (now_us - last_imu_log_us >= IMU_LOG_INTERVAL_US) {
-                log_imu_reading(&data);
-                last_imu_log_us = now_us;
-            }
+
         } else {
             telemetry_update_imu(false, NULL, NULL, 0);
             ESP_LOGW(TAG, "MPU6050 read failed: %s; reinitializing", esp_err_to_name(err));
@@ -242,11 +225,6 @@ static void imu_sampling_task(void *argument)
 
 #ifdef CONFIG_UWB_BATTERY_MONITOR_ENABLE
 static SemaphoreHandle_t battery_read_lock;
-
-static void log_battery_reading(float voltage, float percent)
-{
-    ESP_LOGI(TAG, "BATTERY %.2f V %.0f%%", voltage, percent);
-}
 
 static esp_err_t init_battery_monitor(void)
 {
@@ -291,7 +269,6 @@ static void battery_logging_task(void *argument)
         float percent;
         if (read_battery(&voltage, &percent)) {
             telemetry_update_battery(voltage, percent);
-            log_battery_reading(voltage, percent);
         } else {
             ESP_LOGW(TAG, "battery sample unavailable");
         }
@@ -370,6 +347,7 @@ static void on_range(const uwb_ranging_peer_t *peer)
         .distance_m = median_range(filter, peer->range_m),
         .rx_power_dbm = peer->rx_power_dbm,
     };
+    if (peer->raw) sample.uwb_raw = *peer->raw;
     memcpy(sample.peer_id, peer->device_id, sizeof(sample.peer_id));
     if (filter->has_previous_range) {
         uint64_t elapsed_ms = sample.timestamp_ms - filter->previous_range_ms;
@@ -389,8 +367,6 @@ static void on_range(const uwb_ranging_peer_t *peer)
 
     telemetry_publish(&sample);
 
-    ESP_LOGI(TAG, "UWB distance=%.3f m speed=%+.3f m/s RX=%.2f dBm",
-             sample.distance_m, sample.speed_mps, sample.rx_power_dbm);
 }
 
 static void on_wifi_connection_changed(bool connected, void *arg)
@@ -435,8 +411,8 @@ static void sensing_task(void *argument)
         .on_range = on_range,
         .on_new_device = on_new_device,
         .on_inactive_device = on_inactive_device,
-        .waiting_log_interval_ms = UWB_WAITING_LOG_INTERVAL_MS,
-        .on_waiting = log_uwb_waiting,
+        .waiting_log_interval_ms = 0,
+        .on_waiting = NULL,
     };
     memcpy(config.device_id, network.mac, sizeof(network.mac));
     sensor_coordinator_register(SENSOR_COORDINATOR_UWB);
@@ -455,6 +431,158 @@ static void sensing_task(void *argument)
     }
 }
 
+static void serial_number(char value[24], double number, bool valid, int precision)
+{
+    if (valid && isfinite(number)) snprintf(value, 24, "%.*f", precision, number);
+    else strlcpy(value, "0", 24);
+}
+
+#define SERIAL_CSV_FIELD_COUNT 44
+#define SERIAL_CSV_VALUE_SIZE 48
+
+/* Calendar dates are IST; unsynchronized devices retain an explicit uptime label. */
+static void serial_timestamp(char value[SERIAL_CSV_VALUE_SIZE], time_t now, uint64_t uptime_ms)
+{
+    if (now >= 1577836800) {
+        time_t ist = now + 19800;
+        struct tm date;
+        if (gmtime_r(&ist, &date) && strftime(value, SERIAL_CSV_VALUE_SIZE, "%d-%m-%Y %H:%M:%S", &date)) return;
+    }
+    snprintf(value, SERIAL_CSV_VALUE_SIZE, "uptime_ms=%" PRIu64, uptime_ms);
+}
+
+/* Raw timing and receiver fields use the same order as the saved CSV. */
+static void serial_uwb_columns(const uwb_raw_t *raw,
+                               char values[SERIAL_CSV_FIELD_COUNT][SERIAL_CSV_VALUE_SIZE])
+{
+    if (!raw->valid) return;
+    if (isfinite(raw->distance_m)) snprintf(values[5], SERIAL_CSV_VALUE_SIZE, "%.9g", (double)raw->distance_m);
+    for (unsigned i = 0; i < UWB_RAW_TIMESTAMP_COUNT; ++i)
+        if (raw->timestamp_valid_mask & (1u << i)) snprintf(values[6 + i], SERIAL_CSV_VALUE_SIZE, "%" PRIu64, raw->timestamps[i]);
+    if (isfinite(raw->local_rx_power_dbm)) snprintf(values[14], SERIAL_CSV_VALUE_SIZE, "%.9g", (double)raw->local_rx_power_dbm);
+    if (isfinite(raw->peer_rx_power_dbm)) snprintf(values[15], SERIAL_CSV_VALUE_SIZE, "%.9g", (double)raw->peer_rx_power_dbm);
+    if (raw->rx_diagnostics_mask & 1) snprintf(values[16], SERIAL_CSV_VALUE_SIZE, "%u", raw->cir_power);
+    if (raw->rx_diagnostics_mask & 2) {
+        snprintf(values[17], SERIAL_CSV_VALUE_SIZE, "%" PRIu32, raw->rx_frame_info);
+        snprintf(values[18], SERIAL_CSV_VALUE_SIZE, "%u", (unsigned)((raw->rx_frame_info >> 20) & 0xfff));
+    }
+    if (raw->tof_valid && isfinite(raw->tof_ticks)) snprintf(values[19], SERIAL_CSV_VALUE_SIZE, "%.17g", raw->tof_ticks);
+}
+
+/* Format CIR columns from one coherent snapshot; no SPI access is performed. */
+#ifdef CONFIG_UWB_CIR_ENABLE
+static bool serial_cir_columns(const dw1000_cir_t *cir, uint64_t now_ms,
+                               char values[SERIAL_CSV_FIELD_COUNT][SERIAL_CSV_VALUE_SIZE],
+                               const char *fields[SERIAL_CSV_FIELD_COUNT], char **iq)
+{
+    snprintf(values[22], SERIAL_CSV_VALUE_SIZE, "%" PRIu32, cir->sequence);
+    snprintf(values[23], SERIAL_CSV_VALUE_SIZE, "%" PRIu64, cir->timestamp_ms);
+    snprintf(values[31], SERIAL_CSV_VALUE_SIZE, "%" PRIu64, now_ms >= cir->timestamp_ms ? now_ms - cir->timestamp_ms : 0);
+    snprintf(values[24], SERIAL_CSV_VALUE_SIZE, "%" PRIu64, cir->rx_timestamp);
+    snprintf(values[25], SERIAL_CSV_VALUE_SIZE, "%u", cir->peer_address);
+    snprintf(values[26], SERIAL_CSV_VALUE_SIZE, "%u", cir->frame_type);
+    snprintf(values[27], SERIAL_CSV_VALUE_SIZE, "%u", cir->first_path_index);
+    snprintf(values[28], SERIAL_CSV_VALUE_SIZE, "%u", cir->start_index);
+    snprintf(values[29], SERIAL_CSV_VALUE_SIZE, "%u", (unsigned)CONFIG_UWB_CIR_SAMPLES);
+    snprintf(values[30], SERIAL_CSV_VALUE_SIZE, "%u", cir->preamble_count);
+    snprintf(values[32], SERIAL_CSV_VALUE_SIZE, "%" PRIu32, cir->capture_us);
+    snprintf(values[33], SERIAL_CSV_VALUE_SIZE, "%u", (unsigned)CONFIG_UWB_CIR_INTERVAL_MS);
+    fields[34] = "1.001602564";
+    size_t capacity = 16 * CONFIG_UWB_CIR_SAMPLES + 3, used = 1;
+    *iq = malloc(capacity);
+    if (!*iq) return false;
+    (*iq)[0] = '[';
+    for (unsigned i = 0; i < CONFIG_UWB_CIR_SAMPLES; ++i) {
+        int count = snprintf(*iq + used, capacity - used, "%s[%d,%d]", i ? "," : "", cir->iq[i][0], cir->iq[i][1]);
+        if (count < 0 || (size_t)count >= capacity - used) { free(*iq); *iq = NULL; return false; }
+        used += (size_t)count;
+    }
+    (*iq)[used++] = ']'; (*iq)[used] = '\0';
+    fields[21] = *iq;
+    return true;
+}
+#endif
+
+/* Keep each terminal sample in one printf call; saved CSV uses its own writer. */
+static bool print_csv_sensor_row(const char *const fields[SERIAL_CSV_FIELD_COUNT])
+{
+    static const char *const names[SERIAL_CSV_FIELD_COUNT] = {
+        "timestamp", "source_address", "ip_address", "role", "range",
+        "distance_m_unfiltered", "poll_tx", "poll_rx", "ack_tx", "ack_rx",
+        "range_tx", "range_rx", "report_tx", "report_rx", "local_rx_power_dbm",
+        "peer_rx_power_dbm", "cir_power", "rx_frame_info", "preamble_count", "tof_ticks",
+        "tx_power", "iq", "sequence", "timestamp_ms", "rx_timestamp",
+        "peer_address", "frame_type", "first_path_index", "start_index", "sample_count",
+        "cir_preamble_count", "age_ms", "capture_us", "capture_interval_ms", "sample_period_ns",
+        "accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y",
+        "gyro_z", "battery", "battery_voltage", "speed_mps"
+    };
+    size_t capacity = 1;
+    for (unsigned i = 0; i < SERIAL_CSV_FIELD_COUNT; ++i) {
+        const char *value = fields[i] && fields[i][0] ? fields[i] : "0";
+        size_t length = strlen(value), overhead = strlen(names[i]) + 3;
+        if (capacity > SIZE_MAX - overhead || length > (SIZE_MAX - capacity - overhead) / 2) return false;
+        capacity += length * 2 + overhead;
+    }
+    char *line = malloc(capacity);
+    if (!line) return false;
+    char *out = line;
+    for (unsigned i = 0; i < SERIAL_CSV_FIELD_COUNT; ++i) {
+        if (i) { *out++ = ','; *out++ = ' '; }
+        size_t length = strlen(names[i]);
+        memcpy(out, names[i], length); out += length;
+        *out++ = ':';
+        const char *value = fields[i] && fields[i][0] ? fields[i] : "0";
+        for (const char *at = value; *at; ++at) {
+            if (*at == '\r' || *at == '\n') { *out++ = '\\'; *out++ = *at == '\r' ? 'r' : 'n'; }
+            else *out++ = *at;
+        }
+    }
+    *out = '\0';
+    int written = printf("_________________________________________________________________________________________________________________________\n%s\n", line);
+    free(line);
+    return written >= 0;
+}
+
+/* Console formatting runs on CPU0, never inside the radio/IMU callbacks. */
+static void csv_serial_task(void *argument)
+{
+    (void)argument;
+    for (;;) {
+        telemetry_sample_t sample;
+        char role[8];
+        bool range_valid = telemetry_read_snapshot(&sample, role);
+        char values[SERIAL_CSV_FIELD_COUNT][SERIAL_CSV_VALUE_SIZE];
+        const char *fields[SERIAL_CSV_FIELD_COUNT];
+        for (unsigned i = 0; i < SERIAL_CSV_FIELD_COUNT; ++i) { strcpy(values[i], "0"); fields[i] = values[i]; }
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        serial_timestamp(values[0], (time_t)(telemetry_clock_unix_ms() / 1000), now_ms);
+        snprintf(values[1], SERIAL_CSV_VALUE_SIZE, "%02X:%02X:%02X:%02X:%02X:%02X", network.mac[0], network.mac[1], network.mac[2], network.mac[3], network.mac[4], network.mac[5]);
+        fields[2] = network.ip_address; fields[3] = role;
+        if (range_valid && isfinite(sample.distance_m)) snprintf(values[4], SERIAL_CSV_VALUE_SIZE, "%.9g", (double)sample.distance_m);
+        serial_uwb_columns(&sample.uwb_raw, values);
+        snprintf(values[20], SERIAL_CSV_VALUE_SIZE, "0x%08" PRIX32, DW1000_TX_POWER_SETTING);
+        char *iq = NULL;
+#ifdef CONFIG_UWB_CIR_ENABLE
+        dw1000_cir_t *cir = malloc(sizeof(*cir));
+        if (cir && dw1000_get_cir(cir) && !serial_cir_columns(cir, now_ms, values, fields, &iq))
+            ESP_LOGW(TAG, "Could not format CIR samples");
+        free(cir);
+#endif
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            serial_number(values[35 + axis], sample.accel[axis], sample.imu_valid, 4);
+            serial_number(values[38 + axis], sample.gyro[axis], sample.imu_valid, 4);
+        }
+        serial_number(values[41], sample.battery_percent, sample.battery_valid, 1);
+        serial_number(values[42], sample.battery_voltage, sample.battery_valid, 3);
+        serial_number(values[43], sample.speed_mps, range_valid, 4);
+        if (!print_csv_sensor_row(fields)) ESP_LOGW(TAG, "Could not print CSV sensor row");
+        free(iq);
+        // Raw CIR can exceed 16 KB; this is a rate-limited console snapshot, not a sample queue.
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 void app_main(void)
 {
     ESP_ERROR_CHECK(sensor_coordinator_init());
@@ -464,6 +592,11 @@ void app_main(void)
         ESP_LOGE(TAG, "Wi-Fi connection failed: %s", esp_err_to_name(err));
         return;
     }
+    bool clock_ready = false;
+#ifdef CONFIG_UWB_TIME_SOURCE_API
+    clock_ready = time_sync_startup() == ESP_OK;
+    if (!clock_ready) ESP_LOGW(TAG, "API and SNTP failed; requesting phone/computer clock fallback");
+#endif
     load_antenna_delay();
     ESP_LOGW(TAG, "startup role=%s (menuconfig; dashboard changes are runtime only)",
              role_name(active_role));
@@ -480,11 +613,15 @@ void app_main(void)
         .send_interval_ms = CONFIG_UWB_TELEMETRY_SEND_INTERVAL_MS,
         .antenna_delay = active_antenna_delay,
         .on_control = apply_dashboard_control,
+        .clock_synchronized = clock_ready,
     };
     memcpy(telemetry_config.device_id, network.mac, sizeof(network.mac));
     err = telemetry_start(&telemetry_config);
     if (err != ESP_OK)
         ESP_LOGE(TAG, "Wi-Fi telemetry unavailable: %s", esp_err_to_name(err));
+    else if (xTaskCreatePinnedToCore(csv_serial_task, "csv_serial", 8192, NULL,
+                                    1, NULL, portNUM_PROCESSORS > 1 ? 0 : tskNO_AFFINITY) != pdPASS)
+        ESP_LOGW(TAG, "CSV-style serial output unavailable");
 
     BaseType_t sensing_core = portNUM_PROCESSORS > 1 ? 1 : tskNO_AFFINITY;
     if (xTaskCreatePinnedToCore(sensing_task, "uwb_imu_sensing", 8192, NULL,

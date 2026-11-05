@@ -8,24 +8,14 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
-import java.security.MessageDigest
-import java.security.SecureRandom
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
-import javax.net.ssl.HostnameVerifier
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.X509TrustManager
-import java.security.cert.CertificateException
-import java.security.cert.X509Certificate
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
-import java.net.URL
 import java.nio.charset.StandardCharsets
-import java.time.Instant
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
@@ -44,6 +34,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private val pollWorkers = Executors.newFixedThreadPool(8)
     private val exportWorker = Executors.newSingleThreadExecutor()
     private val polling = ConcurrentHashMap.newKeySet<String>()
+    private val clockSyncing = ConcurrentHashMap.newKeySet<String>()
     private val scanning = AtomicBoolean(false)
     private val lock = Any()
     private var devices = decodeDevices(prefs.getString("devices", "[]") ?: "[]").toMutableList()
@@ -51,9 +42,10 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private val states = mutableMapOf<String, DeviceState>()
     private val ranges = mutableMapOf<Pair<String, String>, RangeReading>()
     private val collectionFile = File(appContext.filesDir, "uwb_session.jsonl")
-    private val csvStore = CsvSessionStore(collectionFile,
-        if (collectionFile.isFile) prefs.getInt("csv_record_count", 0) else 0)
-    private val lastCollectedSamples = loadCollectedCursors()
+    private val csvStore = CsvSessionStore(collectionFile)
+    private val recorder = TelemetryRecorder(csvStore)
+    private val trailStore = TagTrailStore()
+    private val httpsDevices = prefs.getStringSet("https_devices", emptySet()).orEmpty().toMutableSet()
     @Volatile private var collecting = false
     private var recordingStartCount = csvStore.count()
     private var recordingStartedAtMs: Long? = null
@@ -75,7 +67,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         val now = System.currentTimeMillis()
         val onlineStates = states.mapValues { (_, value) ->
             val last = value.sample.optLong("_received_at", 0)
-            value.copy(online = now - last < 2500)
+            value.copy(online = value.error.isBlank() && now - last < 2500)
         }
         val liveDiscovered = discovered.values
             .filter { now - it.lastSeenAtMs <= DISCOVERY_TTL_MS }
@@ -83,7 +75,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         return DashboardSnapshot(devices.toList(), liveDiscovered, onlineStates,
             solvePositions(devices, ranges, now), status, collecting, csvStore.count(),
             if (calibration.isEmpty()) "" else "${calibration.values.minOf { it.samples.size }}/100 samples per anchor",
-            streamingPending, recordingStartCount, recordingStartedAtMs)
+            streamingPending, recordingStartCount, recordingStartedAtMs, trailStore.snapshot(now))
     }
 
     private fun publish() {
@@ -145,9 +137,10 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                                 val mac = normalizeMac(json.optString("mac"))
                                 val sourceIp = (response.address as? Inet4Address)?.hostAddress.orEmpty()
                                 if (mac.isNotBlank() && sourceIp.isNotBlank()) synchronized(lock) {
+                                    if (json.optString("api_scheme") == "https") rememberHttps(mac)
                                     discovered[mac] = FoundDevice(mac,
                                         sourceIp,
-                                        json.optString("role", "unknown"), System.currentTimeMillis())
+                                        json.optString("role", "unknown"), System.currentTimeMillis(), json.optString("api_scheme"))
                                 }
                             }
                         }
@@ -184,11 +177,18 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                 try {
                     val sample = getJson("$ip/api/telemetry", device.mac.ifBlank { device.ip })
                     sample.put("_received_at", System.currentTimeMillis())
+                    if (collecting && !sample.has("cir")) {
+                        val cir = runCatching { getJson("$ip/api/cir", device.key, MAX_CIR_BYTES) }
+                            .getOrElse { JSONObject().put("valid", false).put("error", it.message ?: "CIR unavailable") }
+                        sample.put("cir", cir)
+                    }
                     accept(device, ip, sample)
                 } catch (e: Exception) {
                     synchronized(lock) {
                         val old = states[device.key]
-                        states[device.key] = DeviceState(old?.online == true, old?.sample ?: JSONObject(), e.message ?: "Offline")
+                        val message = "Connection failed for ${device.key}: ${e.message ?: e.javaClass.simpleName}"
+                        states[device.key] = DeviceState(false, old?.sample ?: JSONObject(), message)
+                        breakDeviceTrail(device.mac.ifBlank { device.key })
                     }
                 } finally {
                     polling.remove(device.key)
@@ -199,6 +199,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     }
 
     private fun accept(device: DeviceRecord, ip: String, sample: JSONObject) = synchronized(lock) {
+        if (devices.none { it.key == device.key }) return@synchronized
         val oldKey = device.key
         val mac = normalizeMac(sample.optString("mac")).ifBlank { device.mac }
         if (device.mac.isNotBlank() && mac != device.mac) {
@@ -207,7 +208,15 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         }
         if (mac.isNotBlank() && device.mac != mac) {
             val index = devices.indexOfFirst { it.key == oldKey }
+            if (devices.any { it.mac == mac && it.key != oldKey }) throw IOException("Device MAC $mac is already configured")
             if (index >= 0) {
+                val security = LastWifiCredentialStore.loadDeviceSecurity(appContext, oldKey)
+                if (security.loadError.isNotBlank() || !LastWifiCredentialStore.saveDeviceSecurity(appContext, mac, security))
+                    throw IOException("Could not preserve TLS settings while learning device MAC")
+                if (oldKey in httpsDevices) {
+                    httpsDevices.add(mac)
+                    prefs.edit().putStringSet("https_devices", httpsDevices.toSet()).apply()
+                }
                 devices[index] = devices[index].copy(mac = mac, ip = ip)
                 prefs.edit().putString("devices", encodeDevices(devices)).apply()
             }
@@ -220,21 +229,37 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
             }
         }
         val source = mac.ifBlank { oldKey }
+        val oldSample = states[source]?.sample
         states[source] = DeviceState(true, sample)
+        if (needsSystemClock(sample) && clockSyncing.add(source)) workers.execute {
+            try {
+                val connection = openApiConnection("$ip/api/time", source)
+                try { sendSystemClock(connection) } finally { connection.disconnect() }
+            } catch (error: Exception) {
+                setStatus("Clock sync failed for $source: ${error.message ?: error.javaClass.simpleName}")
+            } finally { clockSyncing.remove(source) }
+        }
         val sourceRole = sample.optString("role", device.role)
+        val receivedAt = sample.optLong("_received_at", System.currentTimeMillis())
+        if (oldSample != null && sample.optLong("timestamp_ms") < oldSample.optLong("timestamp_ms")) breakDeviceTrail(source)
         val list = sample.optJSONArray("ranges") ?: org.json.JSONArray()
-        if (list.length() > 0) {
+        if (!sample.optBoolean("valid")) {
+            breakDeviceTrail(source)
+        } else if (list.length() > 0) {
             for (i in 0 until list.length()) {
                 val item = list.optJSONObject(i) ?: continue
                 val peer = normalizeMac(item.optString("peer"))
                 val distance = item.optDouble("distance_m", Double.NaN)
-                if (peer.isBlank() || !distance.isFinite() || distance <= 0) continue
+                if (peer.isBlank()) continue
                 val anchor = if (sourceRole == "tag") peer else source
                 val tag = if (sourceRole == "tag") source else peer
+                if (!distance.isFinite() || distance <= 0) {
+                    ranges.remove(anchor to tag); trailStore.breakTag(tag); continue
+                }
                 val age = item.optLong("age_ms", 0).coerceAtLeast(0)
                 ranges[anchor to tag] = RangeReading(distance,
                     if (item.isNull("rx_power_dbm")) null else item.optDouble("rx_power_dbm"),
-                    System.currentTimeMillis() - age)
+                    receivedAt - age, "$source:${item.optLong("timestamp_ms", sample.optLong("timestamp_ms", -1))}")
                 if (sourceRole == "anchor") {
                     val target = calibration[anchor]
                     val stamp = item.optLong("timestamp_ms", -1)
@@ -244,39 +269,29 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         } else if (sample.optBoolean("valid")) {
             val peer = normalizeMac(sample.optString("peer"))
             val distance = sample.optDouble("distance_m", Double.NaN)
-            if (peer.isNotBlank() && distance.isFinite() && distance > 0) {
+            if (peer.isNotBlank()) {
                 val anchor = if (sourceRole == "tag") peer else source
                 val tag = if (sourceRole == "tag") source else peer
-                ranges[anchor to tag] = RangeReading(distance, null, System.currentTimeMillis())
-            }
-        }
-        val sequence = sample.optLong("sequence", -1)
-        if (collecting && sequence >= 0) {
-            val timestamp = sample.optLong("timestamp_ms", -1)
-            val previous = lastCollectedSamples[source]
-            val duplicate = previous?.let {
-                it.sequence == sequence && (timestamp < 0 || it.timestampMs == timestamp)
-            } == true
-            if (!duplicate) {
-                val missed = previous?.takeIf { timestamp > it.timestampMs && sequence > it.sequence }
-                    ?.let { (sequence - it.sequence - 1).coerceAtLeast(0) } ?: 0
-                val receivedAt = sample.optLong("_received_at", System.currentTimeMillis())
-                val row = JSONObject(sample.toString()).apply {
-                    put("source_address", source)
-                    put("source_ip", ip)
-                    put("received_at_utc", Instant.ofEpochMilli(receivedAt).toString())
-                    put("missed_sequence_count", missed)
-                }.toString()
-                try {
-                    val count = csvStore.append(row)
-                    lastCollectedSamples[source] = CollectedCursor(sequence, timestamp)
-                    prefs.edit().putInt("csv_record_count", count)
-                        .putString("csv_last_sequences", encodeCollectedCursors()).apply()
-                } catch (error: IOException) {
-                    collecting = false
-                    status = "CSV recording stopped: ${error.message ?: "could not save session data"}"
+                if (distance.isFinite() && distance > 0) {
+                    ranges[anchor to tag] = RangeReading(distance, null,
+                        receivedAt - sample.optLong("age_ms", 0).coerceAtLeast(0), "$source:${sample.optLong("timestamp_ms", -1)}")
+                } else {
+                    ranges.remove(anchor to tag)
+                    trailStore.breakTag(tag)
                 }
             }
+        }
+        val positions = solvePositions(devices, ranges, receivedAt)
+        val evidence = positions.mapValues { (tag, position) ->
+            position.anchors.sorted().joinToString("|") { anchor -> "$anchor:${ranges[anchor to tag]?.measurementId}" }
+        }
+        trailStore.update(positions, evidence, receivedAt)
+        if (collecting) try {
+            recorder.accept(source, ip, sample, positions)
+        } catch (error: IOException) {
+            collecting = false
+            recorder.stop()
+            status = "CSV recording stopped: ${error.message ?: "could not save session data"}"
         }
         if (calibration.isNotEmpty() && calibration.values.all { it.samples.size >= 100 }) finishCalibration()
     }
@@ -287,6 +302,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
             synchronized(lock) {
                 val index = devices.indexOfFirst { it.key == oldKey || it.key == clean.key }
                 if (index >= 0) devices[index] = clean else devices.add(clean)
+                trailStore.clear()
                 prefs.edit().putString("devices", encodeDevices(devices)).apply()
                 status = "${if (index >= 0) "Updated" else "Added"} ${clean.key}"
             }
@@ -296,6 +312,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
 
     fun remove(key: String) {
         synchronized(lock) {
+            trailStore.clear()
             devices.removeAll { it.key == key }
             ranges.keys.removeAll { it.first == key || it.second == key }
             states.remove(key)
@@ -307,28 +324,32 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
 
     fun clear() {
         synchronized(lock) {
-            devices.clear(); ranges.clear(); states.clear()
+            devices.clear(); ranges.clear(); states.clear(); trailStore.clear()
             prefs.edit().putString("devices", "[]").apply()
             status = "All devices cleared"
         }
         publish()
     }
 
-    fun setCollecting(value: Boolean) {
-        synchronized(lock) {
+    fun setCollecting(value: Boolean): IntRange {
+        val bounds = synchronized(lock) {
             if (value && devices.isEmpty()) {
                 status = "Add a device before collecting"
-                return@synchronized
+                return@synchronized recordingStartCount until csvStore.count()
             }
             collecting = value
+            if (!value) recorder.stop()
             if (value) {
+                recorder.begin()
                 recordingStartCount = csvStore.count()
                 recordingStartedAtMs = System.currentTimeMillis()
             }
             status = if (value) "CSV recording started · ${csvStore.count()} records already stored"
                 else "CSV recording stopped · ${csvStore.count()} records ready to export"
+            recordingStartCount until csvStore.count()
         }
         publish()
+        return bounds
     }
 
     fun startOrCancelCalibration(): String? = synchronized(lock) {
@@ -378,22 +399,24 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     }
 
     internal fun exportCsv(output: OutputStream, callback: (Result<CsvExportSummary>) -> Unit) =
-        exportCsv(output, 0, callback)
+        exportCsv(output, 0, null, callback)
 
-    internal fun exportCsv(output: OutputStream, startingAtRecord: Int,
+    internal fun exportCsv(output: OutputStream, startingAtRecord: Int, endingAtRecord: Int? = null,
                            callback: (Result<CsvExportSummary>) -> Unit) {
-        synchronized(lock) {
-            collecting = false
-            status = "Exporting ${csvStore.count() - startingAtRecord.coerceAtMost(csvStore.count())} CSV records..."
+        val end = synchronized(lock) {
+            // Stop/export is ordered after every accepted synchronous append.
+            val frozenEnd = endingAtRecord ?: csvStore.count().also { collecting = false; recorder.stop() }
+            status = "Exporting ${frozenEnd - startingAtRecord} CSV records..."
+            frozenEnd
         }
         publish()
         exportWorker.execute {
-            val result = runCatching { csvStore.exportCsv(output, startingAtRecord) }
+            val result = runCatching { csvStore.exportCsv(output, startingAtRecord, end) }
             main.post {
                 result.onSuccess { summary ->
                     val first = summary.firstReceivedAt ?: "unknown"
                     val last = summary.lastReceivedAt ?: "unknown"
-                    setStatus("CSV exported: ${summary.records} records · $first to $last · ${summary.missedSamples} missed telemetry samples")
+                    setStatus("CSV exported: ${summary.records} records · $first to $last · ${summary.missedSamples} missed UWB / ${summary.missedImuSamples} missed IMU samples before receipt")
                 }.onFailure { error ->
                     runCatching { output.close() }
                     setStatus("CSV export failed: ${error.message ?: "write error"}")
@@ -420,7 +443,6 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                 val connection = openApiConnection("$ip/api/control", id)
                 try {
                     connection.requestMethod = "POST"
-                    connection.connectTimeout = 1000; connection.readTimeout = 1500
                     connection.doOutput = true
                     connection.setRequestProperty("Content-Type", "application/json")
                     connection.outputStream.use { it.write(data.toString().toByteArray(StandardCharsets.UTF_8)) }
@@ -462,7 +484,6 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                     val connection = openApiConnection("$ip/api/control", deviceId)
                     try {
                         connection.requestMethod = "POST"
-                        connection.connectTimeout = 1000; connection.readTimeout = 1500
                         connection.doOutput = true
                         connection.setRequestProperty("Content-Type", "application/json")
                         connection.outputStream.use {
@@ -489,13 +510,16 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private fun getJson(address: String, deviceId: String,
                         maxBytes: Int = MAX_TELEMETRY_BYTES): JSONObject {
         val connection = openApiConnection(address, deviceId)
-        connection.connectTimeout = 700; connection.readTimeout = 900
         connection.setRequestProperty("Cache-Control", "no-cache")
         return try { JSONObject(readLimited(connection, maxBytes)) }
         finally { connection.disconnect() }
     }
 
     private fun readLimited(connection: HttpURLConnection, maxBytes: Int): String {
+        requireSuccessfulResponse(connection)
+        if (connection is javax.net.ssl.HttpsURLConnection) synchronized(lock) {
+            devices.firstOrNull { it.ip == connection.url.host }?.key?.let(::rememberHttps)
+        }
         if (connection.contentLengthLong > maxBytes) throw IOException("HTTP response exceeds $maxBytes bytes")
         val output = ByteArrayOutputStream(minOf(maxBytes, 4096))
         connection.inputStream.use { input ->
@@ -512,61 +536,26 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
 
     private fun openApiConnection(path: String, deviceId: String): HttpURLConnection {
         val credentials = LastWifiCredentialStore.loadDeviceSecurity(appContext, deviceId)
-        val pin = credentials.tlsFingerprint.filterNot { it == ':' || it.isWhitespace() }
-            .uppercase(java.util.Locale.ROOT)
-        if (pin.isBlank()) {
-            return URL("http://$path").openConnection() as HttpURLConnection
+        check(credentials.loadError.isBlank()) { credentials.loadError }
+        val https = synchronized(lock) {
+            if (credentials.requireHttps || credentials.tlsFingerprint.isNotBlank()) rememberHttps(deviceId)
+            deviceId in httpsDevices || discovered[deviceId]?.apiScheme == "https"
         }
-        require(pin.length == 64 && pin.all { it.digitToIntOrNull(16) != null }) {
-            "TLS certificate fingerprint for $deviceId must be 64 hexadecimal characters"
+        return openDeviceConnection(path, https, credentials.tlsFingerprint)
+    }
+
+    private fun rememberHttps(id: String) {
+        if (httpsDevices.add(id)) prefs.edit().putStringSet("https_devices", httpsDevices.toSet()).apply()
+    }
+
+    private fun breakDeviceTrail(source: String) {
+        trailStore.breakTag(source)
+        ranges.keys.filter { it.first == source || it.second == source }.forEach { pair ->
+            trailStore.breakTag(pair.second)
+            ranges.remove(pair)
         }
-        val expected = pin.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        fun matches(certificate: X509Certificate): Boolean =
-            MessageDigest.isEqual(MessageDigest.getInstance("SHA-256").digest(certificate.encoded), expected)
-        val trustManager = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
-                throw CertificateException("Client certificates are not used")
-            }
-            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
-                if (chain.isEmpty() || !matches(chain[0]))
-                    throw CertificateException("Device certificate fingerprint mismatch")
-                chain[0].checkValidity()
-            }
-            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-        }
-        val tls = SSLContext.getInstance("TLS")
-        tls.init(null, arrayOf(trustManager), SecureRandom())
-        val connection = URL("https://$path").openConnection() as HttpsURLConnection
-        connection.sslSocketFactory = tls.socketFactory
-        connection.hostnameVerifier = HostnameVerifier { _, session ->
-            (session.peerCertificates.firstOrNull() as? X509Certificate)?.let(::matches) == true
-        }
-        return connection
     }
 
     fun close() { workers.shutdownNow(); pollWorkers.shutdownNow(); exportWorker.shutdown() }
 
-    private fun loadCollectedCursors(): MutableMap<String, CollectedCursor> = synchronized(lock) {
-        val raw = prefs.getString("csv_last_sequences", "{}") ?: "{}"
-        runCatching {
-            val json = JSONObject(raw)
-            buildMap {
-                val keys = json.keys()
-                while (keys.hasNext()) {
-                    val key = keys.next()
-                    val cursor = json.optJSONObject(key) ?: continue
-                    put(key, CollectedCursor(cursor.optLong("sequence", -1),
-                        cursor.optLong("timestamp_ms", -1)))
-                }
-            }.toMutableMap()
-        }.getOrElse { mutableMapOf() }
-    }
-
-    private fun encodeCollectedCursors(): String = JSONObject().apply {
-        lastCollectedSamples.forEach { (key, cursor) ->
-            put(key, JSONObject().put("sequence", cursor.sequence).put("timestamp_ms", cursor.timestampMs))
-        }
-    }.toString()
 }
-
-private data class CollectedCursor(val sequence: Long, val timestampMs: Long)

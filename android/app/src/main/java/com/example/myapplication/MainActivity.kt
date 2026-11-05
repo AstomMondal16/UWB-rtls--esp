@@ -21,12 +21,14 @@ import com.example.myapplication.ui.theme.onPositiveContainer
 
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.le.ScanResult
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -38,6 +40,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateOffsetAsState
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.fadeIn
@@ -100,6 +103,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -122,6 +126,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -139,9 +144,12 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.verticalScroll
@@ -216,23 +224,23 @@ private data class ImuReading(
 
 private data class CirFrame(val startIndex: Int, val magnitude: List<Double>)
 
+private data class SavedCsvFile(val uri: Uri, val filename: String, val records: Int)
+
 class MainActivity : ComponentActivity() {
     private lateinit var repository: DeviceRepository
     private val dashboard = mutableStateOf(DashboardSnapshot())
     private val uiPreferences = mutableStateOf(DashboardPreferences())
     private val csvFolder = mutableStateOf<Uri?>(null)
+    private val savedCsv = mutableStateOf<SavedCsvFile?>(null)
+    private var pendingCsvFilename = "UWB_session.csv"
     private var pendingCsvStartCount = 0
+    private var pendingCsvEndCount = 0
     private val createCsv = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri: Uri? ->
         if (uri == null) {
             repository.setStatus("CSV export cancelled")
-        } else {
-            val output = runCatching { contentResolver.openOutputStream(uri) }
-                .onFailure { repository.setStatus("Could not create CSV file: ${it.message}") }
-                .getOrNull()
-            if (output == null) repository.setStatus("Could not open the selected CSV file")
-            else repository.exportCsv(output, pendingCsvStartCount) { }
-        }
+        } else saveCsvToUri(uri, pendingCsvStartCount, pendingCsvEndCount)
     }
+
     private val chooseCsvFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) runCatching {
             contentResolver.takePersistableUriPermission(uri,
@@ -249,6 +257,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingCsvStartCount = savedInstanceState?.getInt("csv_export_start") ?: 0
+        pendingCsvEndCount = savedInstanceState?.getInt("csv_export_end") ?: 0
+        pendingCsvFilename = savedInstanceState?.getString("csv_export_filename") ?: "UWB_session.csv"
+        savedCsv.value = savedInstanceState?.let { state ->
+            state.getString("csv_saved_uri")?.let { uri ->
+                SavedCsvFile(Uri.parse(uri), state.getString("csv_saved_filename") ?: "CSV recording",
+                    state.getInt("csv_saved_records"))
+            }
+        }
         repository = DeviceRepository(this) { dashboard.value = it }
         dashboard.value = repository.snapshot()
         val settings = getSharedPreferences("dashboard_settings", MODE_PRIVATE)
@@ -289,6 +306,9 @@ class MainActivity : ComponentActivity() {
                         if (splash) SenseSplash() else DashboardApp(snapshot, repository,
                             preferences = preferences,
                             storageFolder = folder,
+                            savedCsvFile = savedCsv.value,
+                            onDismissSavedCsv = { savedCsv.value = null },
+                            onViewSavedCsv = ::openSavedCsv,
                             onPreferencesChanged = { changed ->
                                 uiPreferences.value = changed
                                 getSharedPreferences("dashboard_settings", MODE_PRIVATE).edit()
@@ -316,11 +336,26 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-    private fun requestCsvExport(label: String, startingAtRecord: Int) {
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("csv_export_start", pendingCsvStartCount)
+        outState.putInt("csv_export_end", pendingCsvEndCount)
+        outState.putString("csv_export_filename", pendingCsvFilename)
+        savedCsv.value?.let { file ->
+            outState.putString("csv_saved_uri", file.uri.toString())
+            outState.putString("csv_saved_filename", file.filename)
+            outState.putInt("csv_saved_records", file.records)
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun requestCsvExport(label: String, startingAtRecord: Int, endingAtRecord: Int) {
         val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", Locale.US))
         val cleanLabel = label.replace(Regex("[^A-Za-z0-9_-]"), "_").trim('_').ifBlank { "session" }
         val filename = "UWB_${cleanLabel}_$stamp.csv"
+        pendingCsvFilename = filename
+        savedCsv.value = null
         pendingCsvStartCount = startingAtRecord
+        pendingCsvEndCount = endingAtRecord
         val folder = csvFolder.value
         if (folder == null) {
             createCsv.launch(filename)
@@ -335,10 +370,36 @@ class MainActivity : ComponentActivity() {
             repository.setStatus("Could not create CSV in selected folder: ${it.message}")
             return
         }
-        val output = runCatching { contentResolver.openOutputStream(uri) }
-            .onFailure { repository.setStatus("Could not open CSV file: ${it.message}") }.getOrNull()
-        if (output == null) repository.setStatus("Selected folder returned no writable stream")
-        else repository.exportCsv(output, startingAtRecord) { }
+        saveCsvToUri(uri, startingAtRecord, endingAtRecord)
+    }
+
+    private fun saveCsvToUri(uri: Uri, startingAtRecord: Int, endingAtRecord: Int) {
+        val fallbackName = pendingCsvFilename
+        val output = runCatching { contentResolver.openOutputStream(uri) }.getOrElse {
+            repository.setStatus("Could not open CSV file: ${it.message}")
+            return
+        }
+        if (output == null) { repository.setStatus("Selected file returned no writable stream"); return }
+        repository.exportCsv(output, startingAtRecord, endingAtRecord) { result ->
+            result.onSuccess { summary ->
+                val filename = runCatching {
+                    contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    }
+                }.getOrNull()?.takeIf(String::isNotBlank) ?: fallbackName
+                savedCsv.value = SavedCsvFile(uri, filename, summary.records)
+            }
+        }
+    }
+
+    private fun openSavedCsv(uri: Uri): String? = try {
+        startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "text/csv")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        null
+    } catch (_: ActivityNotFoundException) {
+        "No CSV viewer is installed. Open this file with a spreadsheet app."
+    } catch (_: Exception) {
+        "Could not open the saved CSV. You can find it in your chosen folder."
     }
 
     private fun openStorageFolder(folder: Uri?) {
@@ -390,13 +451,35 @@ private fun AppNavigation(selected: Int, rail: Boolean, reduceAnimations: Boolea
             }
         }
     } else {
-        NavigationBar(containerColor = colors.surfaceContainerLow, tonalElevation = 0.dp) {
-            titles.forEachIndexed { index, title ->
-                NavigationBarItem(selected = selected == index, onClick = { onSelect(index) },
-                    icon = { NavigationGlyph(index, selected == index, reduceAnimations) },
-                    label = { Text(title, style = MaterialTheme.typography.labelMedium) },
-                    colors = NavigationBarItemDefaults.colors(indicatorColor = colors.primaryContainer,
-                        selectedIconColor = Accent, selectedTextColor = Accent))
+        val centers = remember { mutableStateMapOf<Int, androidx.compose.ui.geometry.Offset>() }
+        var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+        Box(Modifier.fillMaxWidth().background(colors.surfaceContainerLow)
+            .onGloballyPositioned { origin = it.positionInRoot() }) {
+            centers[selected]?.let { target ->
+                val center by animateOffsetAsState(target - origin,
+                    animationSpec = tween(if (reduceAnimations) 0 else 300), label = "navigation-indicator")
+                Canvas(Modifier.matchParentSize()) {
+                    val width = 64.dp.toPx()
+                    val height = 32.dp.toPx()
+                    drawRoundRect(colors.primaryContainer,
+                        topLeft = center - androidx.compose.ui.geometry.Offset(width / 2, height / 2),
+                        size = androidx.compose.ui.geometry.Size(width, height),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(height / 2))
+                }
+            }
+            NavigationBar(containerColor = Color.Transparent, tonalElevation = 0.dp) {
+                titles.forEachIndexed { index, title ->
+                    NavigationBarItem(selected = selected == index, onClick = { onSelect(index) },
+                        icon = {
+                            Box(Modifier.onGloballyPositioned {
+                                centers[index] = it.positionInRoot() +
+                                    androidx.compose.ui.geometry.Offset(it.size.width / 2f, it.size.height / 2f)
+                            }) { NavigationGlyph(index, selected == index, reduceAnimations) }
+                        },
+                        label = { Text(title, style = MaterialTheme.typography.labelMedium) },
+                        colors = NavigationBarItemDefaults.colors(indicatorColor = Color.Transparent,
+                            selectedIconColor = Accent, selectedTextColor = Accent))
+                }
             }
         }
     }
@@ -404,13 +487,13 @@ private fun AppNavigation(selected: Int, rail: Boolean, reduceAnimations: Boolea
 
 @Composable
 private fun TabTransition(targetState: Int, reduceAnimations: Boolean, modifier: Modifier = Modifier,
-                          label: String, content: @Composable (Int) -> Unit) {
+                          label: String, fullSlide: Boolean = false, content: @Composable (Int) -> Unit) {
     AnimatedContent(targetState = targetState, modifier = modifier, label = label,
         transitionSpec = {
-            val duration = if (reduceAnimations) 0 else 240
+            val duration = if (reduceAnimations) 0 else if (fullSlide) 300 else 240
             val direction = if (targetState > initialState) 1 else -1
-            ((slideInHorizontally(tween(duration)) { direction*it/12 } + fadeIn(tween(duration))) togetherWith
-                (slideOutHorizontally(tween(duration)) { -direction*it/16 } + fadeOut(tween(duration*2/3))))
+            ((slideInHorizontally(tween(duration)) { direction * it / if (fullSlide) 1 else 12 } + fadeIn(tween(duration))) togetherWith
+                (slideOutHorizontally(tween(duration)) { -direction * it / if (fullSlide) 1 else 16 } + fadeOut(tween(duration*2/3))))
                 .using(SizeTransform(clip = true) { _, _ -> tween(duration) })
         }) { visibleState -> content(visibleState) }
 }
@@ -422,11 +505,14 @@ private fun DashboardApp(
     repo: DeviceRepository,
     preferences: DashboardPreferences,
     storageFolder: Uri?,
+    savedCsvFile: SavedCsvFile?,
+    onDismissSavedCsv: () -> Unit,
+    onViewSavedCsv: (Uri) -> String?,
     onPreferencesChanged: (DashboardPreferences) -> Unit,
     onPickStorage: () -> Unit,
     onResetStorage: () -> Unit,
     onOpenStorage: () -> Unit,
-    onSaveCsv: (String, Int) -> Unit,
+    onSaveCsv: (String, Int, Int) -> Unit,
     onScan: () -> Unit
 ) {
     var editing by remember { mutableStateOf<DeviceRecord?>(null) }
@@ -591,7 +677,7 @@ private fun DashboardApp(
         Row(Modifier.fillMaxSize()) {
             if (useRail) AppNavigation(activeScreen, true, preferences.reduceAnimations, selectDestination)
         TabTransition(targetState = activeScreen, modifier = Modifier.weight(1f).fillMaxHeight().padding(padding).consumeWindowInsets(padding),
-            reduceAnimations = preferences.reduceAnimations, label = "main-navigation") { screen ->
+            reduceAnimations = preferences.reduceAnimations, label = "main-navigation", fullSlide = true) { screen ->
             when (screen) {
                 1 -> DevicesPage(snapshot, names, repo,
                     onScan = onScan,
@@ -670,9 +756,9 @@ private fun DashboardApp(
                                         modifier = Modifier.widthIn(min = minimumActionWidth).weight(1f)
                                     ) {
                                         if (snapshot.collecting) {
-                                            repo.setCollecting(false)
-                                            if (snapshot.collected > snapshot.recordingStartCount)
-                                                onSaveCsv(chosen?.let { names[it.key] }.orEmpty().ifBlank { "session" }, snapshot.recordingStartCount)
+                                            val bounds = repo.setCollecting(false)
+                                            if (!bounds.isEmpty())
+                                                onSaveCsv("session", bounds.first, bounds.last + 1)
                                             else repo.setStatus("Recording stopped: no new device records were received")
                                         } else repo.setCollecting(true)
                                     }
@@ -687,9 +773,10 @@ private fun DashboardApp(
                                     }
                                 }
                             }
-                            FeedbackMessage(snapshot.status, busy = snapshot.streamingPending || snapshot.status.startsWith("Exporting"))
-                            if (snapshot.calibrationProgress.isNotBlank())
-                                FeedbackMessage("Calibration \u00b7 ${snapshot.calibrationProgress}", busy = true)
+                            val feedback = dashboardFeedback(snapshot.status,
+                                chosen?.let { snapshot.states[it.key]?.error }.orEmpty(),
+                                snapshot.calibrationProgress, snapshot.streamingPending)
+                            FeedbackMessage(feedback.message, busy = feedback.busy, details = feedback.details)
                         }
                         if (preferences.monitorTabs) stickyHeader(key = "monitor-tabs") {
                             SecondaryTabRow(selectedTabIndex = monitorTab, containerColor = Page) {
@@ -723,7 +810,7 @@ private fun DashboardApp(
                                                     if (snapshot.devices.none { it.role == "anchor" }) {
                                                         EmptyHint("Add at least three anchors in Devices and enter their measured coordinates to locate a tag.")
                                                     } else {
-                                                        LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, fitMapRequest,
+                                                        LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, snapshot.trails, fitMapRequest,
                                                             Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(20.dp)), viewport = mapViewport)
                                                         MapLegend()
                                                     }
@@ -808,7 +895,8 @@ private fun DashboardApp(
                                 Text("${snapshot.devices.size} configured · ${snapshot.discovered.size} discovered · ${snapshot.collected} stored records",
                                     color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f))
                                 TextButton(enabled = snapshot.collected > 0 && !snapshot.status.startsWith("Exporting"), onClick = {
-                                    onSaveCsv(chosen?.let { names[it.key] }.orEmpty().ifBlank { "session" }, 0)
+                                    repo.setCollecting(false)
+                                    onSaveCsv("session", 0, repo.snapshot().collected)
                                 }) { Text("Export all", fontSize = 14.sp) }
                             }
                         }
@@ -834,7 +922,7 @@ private fun DashboardApp(
                     Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                         EmptyHint("Add at least three anchors with measured coordinates in Devices to locate a tag.")
                     }
-                } else LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, fitMapRequest,
+                } else LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, snapshot.trails, fitMapRequest,
                     Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)))
                 MapLegend()
                 Text("Pinch to zoom \u00b7 Drag to pan \u00b7 Double tap to fit", color = Muted, fontSize = 12.sp,
@@ -854,13 +942,13 @@ private fun DashboardApp(
     if (editorOpen) DeviceEditorDialog(editing,
         initialSecurity = LastWifiCredentialStore.loadDeviceSecurity(context,
             editing?.let { it.mac.ifBlank { it.ip } }.orEmpty()),
-        onDismiss = { editorOpen = false; configOpen = true }, onSave = { record, fingerprint ->
+        onDismiss = { editorOpen = false; configOpen = true }, onSave = { record, security ->
         val error = repo.upsert(record, editing?.key)
         if (error == null) {
-            if (!LastWifiCredentialStore.saveDeviceSecurity(context, record.mac.ifBlank { record.ip }, fingerprint)) {
+            if (!LastWifiCredentialStore.saveDeviceSecurity(context, record.mac.ifBlank { record.ip }, security)) {
                 repo.setStatus("Could not save device connection settings")
             } else {
-                if (record.ip.isNotBlank()) repo.postControl(record.ip, JSONObject().put("role", record.role), record.mac)
+                if (record.ip.isNotBlank()) repo.postControl(record.ip, JSONObject().put("role", record.role), record.key)
                 editorOpen = false; configOpen = true
             }
         } else repo.setStatus(error)
@@ -869,6 +957,46 @@ private fun DashboardApp(
         text = { Text("This removes the saved device map and localization configuration.") },
         confirmButton = { TextButton(onClick = { repo.clear(); clearConfirm = false }) { Text("Clear", color = Danger) } },
         dismissButton = { TextButton(onClick = { clearConfirm = false }) { Text("Cancel") } })
+    savedCsvFile?.let { file ->
+        CsvSavedDialog(file, onView = { onViewSavedCsv(file.uri) }, onDone = {
+            onDismissSavedCsv()
+            configOpen = false
+            settingsOpen = false
+            mapFullscreen = false
+        })
+    }
+
+}
+
+@Composable
+private fun CsvSavedDialog(file: SavedCsvFile, onView: () -> String?, onDone: () -> Unit) {
+    var viewError by remember(file.uri) { mutableStateOf("") }
+    val colors = MaterialTheme.colorScheme
+    AlertDialog(
+        onDismissRequest = onDone,
+        icon = {
+            Box(Modifier.size(56.dp).background(colors.positiveContainer, CircleShape), contentAlignment = Alignment.Center) {
+                InstrumentIcon("check", colors.onPositiveContainer, Modifier.size(32.dp))
+            }
+        },
+        title = { Text("Saved successfully") },
+        text = {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(file.filename, color = Ink, style = MaterialTheme.typography.bodyLarge)
+                Text("${file.records} ${if (file.records == 1) "reading" else "readings"} saved to CSV", color = Muted)
+                if (viewError.isNotBlank()) Text(viewError, color = Danger,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+            }
+        },
+        confirmButton = {
+            Button(onClick = { viewError = onView().orEmpty() }) {
+                InstrumentIcon("eye", LocalContentColor.current, Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("View")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDone) { Text("Done") } }
+    )
 }
 
 @Composable
@@ -907,43 +1035,73 @@ private fun DashboardActionButton(
     }
 }
 
-@Composable
-private fun FeedbackMessage(message: String, busy: Boolean = false) {
-    if (message.isBlank()) return
-    var expanded by remember { mutableStateOf(false) }
-    val failure = message.contains("failed", true) || message.contains("could not", true) ||
+internal fun feedbackSummary(message: String): String = when {
+    message.startsWith("Connection failed for ") -> "Connection failed"
+    message.startsWith("Scan failed:") -> "Network scan failed"
+    message.startsWith("Scan complete \u00b7 0 found") -> "No devices found"
+    message.startsWith("CIR request failed:") -> "Could not read CIR"
+    message.startsWith("Control failed:") -> "Device control failed"
+    message.startsWith("CSV export failed:") -> "CSV export failed"
+    else -> message
+}
+
+internal data class DashboardFeedback(val message: String, val details: String, val busy: Boolean)
+
+private fun feedbackIsFailure(message: String): Boolean =
+    message.contains("failed", true) || message.contains("could not", true) ||
         message.contains("permission", true) || message.contains("mismatch", true)
-    val summary = when {
-        message.startsWith("Scan failed:") -> "Network scan failed"
-        message.startsWith("Scan complete \u00b7 0 found") -> "No devices found on this network"
-        message.startsWith("CIR request failed:") -> "Could not read CIR from this device"
-        message.startsWith("Control failed:") -> "Device control failed"
-        message.startsWith("CSV export failed:") -> "CSV export failed"
-        else -> message
+
+internal fun dashboardFeedback(status: String, connectionError: String, calibrationProgress: String,
+                               streamingPending: Boolean): DashboardFeedback {
+    val calibration = calibrationProgress.takeIf(String::isNotBlank)?.let { "Calibration \u00b7 $it" }.orEmpty()
+    val primary = when {
+        connectionError.isNotBlank() -> connectionError
+        feedbackIsFailure(status) -> status
+        calibration.isNotBlank() -> calibration
+        else -> status
     }
-    val hasDetails = summary != message || message.length > 80
+    val details = listOf(primary, status, connectionError, calibration)
+        .filter(String::isNotBlank).distinct().joinToString("\n\n")
+    val busy = connectionError.isBlank() && !feedbackIsFailure(primary) && (streamingPending || primary == calibration && calibration.isNotBlank() ||
+        primary.startsWith("Exporting") || primary.startsWith("Scanning"))
+    return DashboardFeedback(primary, details, busy)
+}
+
+@Composable
+private fun FeedbackMessage(message: String, busy: Boolean = false, details: String = message) {
+    if (message.isBlank()) return
+    val summary = feedbackSummary(message)
+    var expanded by remember(summary) { mutableStateOf(false) }
+    var summaryClipped by remember(summary) { mutableStateOf(false) }
+    val failure = feedbackIsFailure(message)
+    val hasDetails = summary != message || details != message || message.length > 80 || summaryClipped
     val colors = MaterialTheme.colorScheme
-    Surface(color = if (failure) colors.errorContainer else if (busy) colors.primaryContainer else colors.surfaceContainerLow,
-        shape = MaterialTheme.shapes.small) {
-        Column(Modifier.fillMaxWidth().padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (busy) {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Accent)
-                    Spacer(Modifier.width(8.dp))
+    val background = when {
+        failure -> colors.errorContainer.copy(alpha = .4f).compositeOver(colors.surface)
+        busy -> colors.primaryContainer.copy(alpha = .4f).compositeOver(colors.surface)
+        else -> colors.surfaceContainerLow
+    }
+    Surface(color = background, shape = MaterialTheme.shapes.small) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                    if (busy && !failure) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = colors.primary)
+                    else InstrumentIcon(if (failure) "error" else "info", if (failure) colors.error else Muted, Modifier.size(20.dp))
                 }
-                if (!busy) {
-                    InstrumentIcon(if (failure) "error" else "info", if (failure) colors.onErrorContainer else Muted, Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(summary, color = if (failure) colors.onErrorContainer else if (busy) colors.onPrimaryContainer else Muted, fontSize = 14.sp,
-                    maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis,
+                Text(summary, color = colors.onSurface, style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    onTextLayout = { if (it.hasVisualOverflow) summaryClipped = true },
                     modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite })
-                if (hasDetails) TextButton(onClick = { expanded = !expanded }) {
-                    Text(if (expanded) "Less" else "Details")
+                if (hasDetails) TextButton(onClick = { expanded = !expanded }, modifier = Modifier.widthIn(min = 80.dp)) {
+                    Text(if (expanded) "Hide" else "Details")
                 }
             }
-            if (expanded && summary != message) Text(message, color = if (failure) colors.onErrorContainer else Muted,
-                fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+            if (expanded && hasDetails) SelectionContainer {
+                Text(details, color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.fillMaxWidth().padding(start = 36.dp, top = 4.dp, bottom = 8.dp))
+            }
         }
     }
 }
@@ -1590,7 +1748,7 @@ private fun DevicesPage(snapshot: DashboardSnapshot, names: Map<String, String>,
 
 
 internal data class SavedWifiCredentials(val ssid: String = "", val password: String = "")
-internal data class DeviceSecurity(val tlsFingerprint: String = "")
+internal data class DeviceSecurity(val tlsFingerprint: String = "", val requireHttps: Boolean = false, val loadError: String = "")
 
 internal object LastWifiCredentialStore {
     private const val PREFS = "wifi_provisioning"
@@ -1640,24 +1798,22 @@ internal object LastWifiCredentialStore {
             cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(),
                 GCMParameterSpec(128, packed.copyOfRange(0, IV_LENGTH)))
             val json = JSONObject(String(cipher.doFinal(packed.copyOfRange(IV_LENGTH, packed.size)), Charsets.UTF_8))
-            DeviceSecurity(json.optString("tls_fingerprint"))
+            DeviceSecurity(json.optString("tls_fingerprint"), json.optBoolean("require_https"))
         } catch (_: Exception) {
-            context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
-                .remove("device_${deviceIdentity(mac)}").apply()
-            DeviceSecurity()
+            DeviceSecurity(requireHttps = true, loadError = "Saved TLS settings could not be read. Re-enter device connection settings.")
         }
     }
 
     fun saveDeviceSecurity(context: android.content.Context, mac: String,
-                           tlsFingerprint: String): Boolean = try {
+                           security: DeviceSecurity): Boolean = try {
         val key = "device_${deviceIdentity(mac)}"
-        if (tlsFingerprint.isBlank()) {
+        if (security.tlsFingerprint.isBlank() && !security.requireHttps) {
             context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
                 .remove(key).apply()
         } else {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-            val plaintext = JSONObject().put("tls_fingerprint", tlsFingerprint.trim())
+            val plaintext = JSONObject().put("tls_fingerprint", security.tlsFingerprint.trim()).put("require_https", security.requireHttps)
                 .toString().toByteArray(Charsets.UTF_8)
             val packed = cipher.iv + cipher.doFinal(plaintext)
             context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
@@ -1722,7 +1878,8 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
         LastWifiCredentialStore.save(context, ssid, password)
         onDismiss()
     }
-    var status by remember { mutableStateOf("Searching for nearby provisioning devices…") }
+    var deviceStatus by remember { mutableStateOf("Searching for nearby provisioning devices…") }
+    var wifiStatus by remember { mutableStateOf("") }
     var scanning by remember { mutableStateOf(true) }
     var sending by remember { mutableStateOf(false) }
     var bleConnected by remember { mutableStateOf(false) }
@@ -1730,8 +1887,8 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     var showPassword by remember { mutableStateOf(false) }
     val observer = remember {
         ProvisionConnectionObserver(
-            onConnected = { bleConnected = true; status = "Connected. Enter the Wi-Fi network name and password." },
-            onFailed = { bleConnected = false; status = it }
+            onConnected = { bleConnected = true; wifiStatus = ""; deviceStatus = "Connected. Enter the Wi-Fi network name and password." },
+            onFailed = { bleConnected = false; wifiStatus = ""; deviceStatus = it }
         )
     }
     DisposableEffect(Unit) {
@@ -1744,11 +1901,11 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     val scan = {
         devices = emptyList()
         scanning = true
-        status = "Searching for nearby provisioning devices…"
+        deviceStatus = "Searching for nearby provisioning devices…"
         manager.searchBleEspDevices(object : BleScanListener {
             override fun scanStartFailed() {
                 scanning = false
-                status = "Bluetooth is off or scanning could not start"
+                deviceStatus = "Bluetooth is off or scanning could not start"
             }
             override fun onPeripheralFound(device: BluetoothDevice, scanResult: ScanResult) {
                 val services = scanResult.scanRecord?.serviceUuids.orEmpty()
@@ -1761,12 +1918,12 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
             }
             override fun scanCompleted() {
                 scanning = false
-                if (devices.isEmpty()) status = "No provisioning device found. Check power and try again."
-                else status = "Select the UWB device to connect."
+                if (devices.isEmpty()) deviceStatus = "No provisioning device found. Check power and try again."
+                else deviceStatus = "Select the UWB device to connect."
             }
             override fun onFailure(e: Exception) {
                 scanning = false
-                status = "BLE scan failed: " + (e.localizedMessage ?: "unknown error")
+                deviceStatus = "BLE scan failed: " + (e.localizedMessage ?: "unknown error")
             }
         })
     }
@@ -1787,6 +1944,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                     colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = scan, enabled = !scanning, modifier = Modifier.fillMaxWidth()) {
                     Text(if (scanning) "Scanning…" else "Scan for UWB devices")
                 }
+                FeedbackMessage(deviceStatus, busy = scanning)
                 if (devices.isNotEmpty()) {
                     LazyColumn(Modifier.height(128.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         items(devices) { target ->
@@ -1795,7 +1953,8 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                             OutlinedButton(shape = MaterialTheme.shapes.medium,
                     colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = {
                                 bleConnected = false
-                                status = "Connecting to " + deviceLabel + "…"
+                                wifiStatus = ""
+                                deviceStatus = "Connecting to " + deviceLabel + "…"
                                 val esp = manager.createESPDevice(ESPConstants.TransportType.TRANSPORT_BLE,
                                     ESPConstants.SecurityType.SECURITY_1)
                                 esp.setProofOfPossession("")
@@ -1825,7 +1984,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                         }) { InstrumentIcon(if (showPassword) "eyeOff" else "eye", Muted) }
                     },
                     modifier = Modifier.fillMaxWidth())
-                FeedbackMessage(status, busy = scanning || sending)
+                if (wifiStatus.isNotBlank()) FeedbackMessage(wifiStatus, busy = sending)
                 if (!bleConnected) Text("Connect to a nearby UWB device to enable credential transfer", color = Muted, fontSize = 14.sp)
                 Button(shape = MaterialTheme.shapes.medium,
                     colors = androidx.compose.material3.ButtonDefaults.buttonColors(disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant, disabledContentColor = Muted), onClick = {
@@ -1833,41 +1992,41 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                     LastWifiCredentialStore.save(context, ssid, password)
                     val esp = activeDevice
                     if (esp == null || !bleConnected || ssid.isBlank()) {
-                        status = if (esp == null || !bleConnected) "Select and connect to a device first" else "Enter the Wi-Fi network name"
+                        wifiStatus = if (esp == null || !bleConnected) "Select and connect to a device first" else "Enter the Wi-Fi network name"
                         return@Button
                     }
                     if (ssid.trim().toByteArray(Charsets.UTF_8).size !in 1..32) {
-                        status = "Wi-Fi network name must be 1 to 32 bytes"
+                        wifiStatus = "Wi-Fi network name must be 1 to 32 bytes"
                         return@Button
                     }
                     val passwordBytes = password.toByteArray(Charsets.UTF_8)
                     if (passwordBytes.isNotEmpty() && passwordBytes.size !in 8..63 &&
                         !(passwordBytes.size == 64 && password.all { it.digitToIntOrNull(16) != null })) {
-                        status = "Use an open network, an 8-63 character password, or a 64-digit hexadecimal key"
+                        wifiStatus = "Use an open network, an 8-63 character password, or a 64-digit hexadecimal key"
                         return@Button
                     }
                     sending = true
-                    status = "Sending credentials and waiting for Wi-Fi…"
+                    wifiStatus = "Sending credentials and waiting for Wi-Fi…"
                     esp.provision(ssid.trim(), password, object : ProvisionListener {
                         override fun createSessionFailed(e: Exception) {
-                            sending = false; status = "Could not create secure session: " + (e.localizedMessage ?: "")
+                            sending = false; wifiStatus = "Could not create secure session: " + (e.localizedMessage ?: "")
                         }
-                        override fun wifiConfigSent() { status = "Credentials sent securely to the device" }
+                        override fun wifiConfigSent() { wifiStatus = "Credentials sent securely to the device" }
                         override fun wifiConfigFailed(e: Exception) {
-                            sending = false; status = "Could not send credentials: " + (e.localizedMessage ?: "")
+                            sending = false; wifiStatus = "Could not send credentials: " + (e.localizedMessage ?: "")
                         }
-                        override fun wifiConfigApplied() { status = "Credentials received; testing the Wi-Fi connection…" }
+                        override fun wifiConfigApplied() { wifiStatus = "Credentials received; testing the Wi-Fi connection…" }
                         override fun wifiConfigApplyFailed(e: Exception) {
-                            sending = false; status = "Wi-Fi connection failed. Device attempted to restore its previous network; verify its connection."
+                            sending = false; wifiStatus = "Wi-Fi connection failed. Device attempted to restore its previous network; verify its connection."
                         }
                         override fun provisioningFailedFromDevice(failureReason: ESPConstants.ProvisionFailureReason) {
-                            sending = false; status = "Wi-Fi connection failed (" + failureReason + "). Device attempted to restore its previous network; verify its connection."
+                            sending = false; wifiStatus = "Wi-Fi connection failed (" + failureReason + "). Device attempted to restore its previous network; verify its connection."
                         }
                         override fun deviceProvisioningSuccess() {
-                            sending = false; status = "Wi-Fi connected. Device setup is complete."
+                            sending = false; wifiStatus = "Wi-Fi connected. Device setup is complete."
                         }
                         override fun onProvisioningFailed(e: Exception) {
-                            sending = false; status = "Provisioning failed: " + (e.localizedMessage ?: "unknown error")
+                            sending = false; wifiStatus = "Provisioning failed: " + (e.localizedMessage ?: "unknown error")
                         }
                     })
                 }, enabled = !sending && bleConnected && ssid.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
@@ -2222,7 +2381,7 @@ private fun SectionCard(title: String, headerAction: (@Composable () -> Unit)? =
 @Composable
 private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
                                initialSecurity: DeviceSecurity,
-                               onSave: (DeviceRecord, String) -> Unit) {
+                               onSave: (DeviceRecord, DeviceSecurity) -> Unit) {
     var mac by remember(device) { mutableStateOf(device?.mac.orEmpty()) }
     var ip by remember(device) { mutableStateOf(device?.ip.orEmpty()) }
     var role by remember(device) { mutableStateOf(device?.role ?: "anchor") }
@@ -2231,7 +2390,8 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
     var z by remember(device) { mutableStateOf(device?.z?.toString() ?: "0") }
     var yaw by remember(device) { mutableStateOf(device?.yawOffset?.toString() ?: "0") }
     var tlsFingerprint by remember(device) { mutableStateOf(initialSecurity.tlsFingerprint) }
-    var error by remember { mutableStateOf("") }
+    var requireHttps by remember(device) { mutableStateOf(initialSecurity.requireHttps) }
+    var error by remember { mutableStateOf(initialSecurity.loadError) }
     fun record(): DeviceRecord? {
         val values = listOf(x.toDoubleOrNull(), y.toDoubleOrNull(), z.toDoubleOrNull(), yaw.toDoubleOrNull())
         if (values.any { it == null }) { error = "Enter valid numeric coordinates"; return null }
@@ -2253,9 +2413,15 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
                     NumericField("Z (m)", z, { z = it }, Modifier.weight(1f))
                     NumericField("Yaw offset°", yaw, { yaw = it }, Modifier.weight(1f))
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = requireHttps || tlsFingerprint.isNotBlank(),
+                        onCheckedChange = { requireHttps = it }, enabled = tlsFingerprint.isBlank())
+                    Text("Require HTTPS")
+                }
+                Text("HTTPS is automatic for TLS-capable devices. Older firmware uses local HTTP. A verified HTTPS device never falls back to HTTP.", style = MaterialTheme.typography.bodySmall, color = Muted)
                 OutlinedTextField(tlsFingerprint, { tlsFingerprint = it },
                     label = { Text("TLS fingerprint (optional)") },
-                    supportingText = { Text("Leave blank to use local HTTP") }, shape = MaterialTheme.shapes.small, singleLine = true,
+                    supportingText = { Text("Self-signed certificate SHA-256. Its IP subjectAltName must match this address. Blank uses system trust for HTTPS.") }, shape = MaterialTheme.shapes.small, singleLine = true,
                     modifier = Modifier.fillMaxWidth())
                 if (error.isNotBlank()) Text(error, color = Danger, fontSize = 12.sp)
             }
@@ -2265,7 +2431,7 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
             if (fingerprint.isNotBlank() && (fingerprint.length != 64 || fingerprint.any { it.digitToIntOrNull(16) == null })) {
                 error = "Fingerprint must be blank or 64 hexadecimal characters"; return@TextButton
             }
-            record()?.let { onSave(it, fingerprint.uppercase(Locale.ROOT)) }
+            record()?.let { onSave(it, DeviceSecurity(fingerprint.uppercase(Locale.ROOT), requireHttps)) }
         }) { Text("Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
@@ -2284,11 +2450,13 @@ private class MapViewport {
 
 @Composable
 private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, Position>, names: Map<String, String>,
-                            states: Map<String, DeviceState>, fitRequest: Int, modifier: Modifier = Modifier, viewport: MapViewport? = null) {
+                            states: Map<String, DeviceState>, trails: Map<String, List<TrailPoint>>, fitRequest: Int, modifier: Modifier = Modifier, viewport: MapViewport? = null) {
     val ink = Ink
     val muted = Muted
     val green = Positive
     val cyan = Accent
+    val trailColors = listOf(Accent, MaterialTheme.colorScheme.tertiary, Warning, Positive)
+    fun tagColor(tag: String) = trailColors[(tag.hashCode() and Int.MAX_VALUE) % trailColors.size]
     val axisX = Danger
     val axisY = Positive
     val grid = Grid
@@ -2346,11 +2514,8 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
         minX = centerX - halfX; maxX = centerX + halfX
         minY = centerY - halfY; maxY = centerY + halfY
         val scale = (size.width - margin * 2) / (maxX - minX)
-        fun screen(x: Double, y: Double): androidx.compose.ui.geometry.Offset {
-            return androidx.compose.ui.geometry.Offset(
-                margin + ((x - minX) * scale).toFloat() + pan.x,
-                size.height - margin - ((y - minY) * scale).toFloat() + pan.y)
-        }
+        val projection = MapProjection(minX, minY, scale, size.height, margin, pan.x, pan.y)
+        fun screen(x: Double, y: Double) = androidx.compose.ui.geometry.Offset(projection.x(x), projection.y(y))
         val raw = max(min(maxX - minX, maxY - minY) / 10, .01)
         val base = Math.pow(10.0, floor(log10(raw)))
         val step = base * when { raw / base > 2 -> 5; raw / base > 1 -> 2; else -> 1 }
@@ -2496,6 +2661,20 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
                 nativeCanvas.drawText(text, left + labelPaddingX, top + labelPaddingY - labelMetrics.ascent, labelPaint)
             }
 
+            // Draw behind anchors, current markers and labels; use the same screen() as markers.
+            clipRect {
+                trails.forEach { (tag, history) ->
+                    val path = Path()
+                    history.forEachIndexed { index, point ->
+                        val at = screen(point.x, point.y)
+                        if (index == 0 || point.startsSegment) path.moveTo(at.x, at.y)
+                        else path.lineTo(at.x, at.y)
+                    }
+                    drawPath(path, tagColor(tag).copy(alpha = .65f),
+                        style = Stroke(width = 2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                            join = androidx.compose.ui.graphics.StrokeJoin.Round))
+                }
+            }
             positions.forEach { (tag, p) ->
                 p.anchors.forEach { id -> anchors.firstOrNull { it.mac == id }?.let { drawLine(cyan.copy(alpha = .28f), screen(it.x, it.y), screen(p.x, p.y), 1.5f) } }
             }
@@ -2515,12 +2694,13 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
             }
             positions.forEach { (tag, p) ->
                 val center = screen(p.x, p.y)
-                drawCircle(cyan.copy(alpha = .35f), max(7f, (p.error * scale).toFloat()), center, style = Stroke(2f))
-                drawCircle(cyan, 5.dp.toPx(), center)
+                val color = tagColor(tag)
+                drawCircle(color.copy(alpha = .35f), max(7f, (p.error * scale).toFloat()), center, style = Stroke(2f))
+                drawCircle(color, 5.dp.toPx(), center)
                 drawCircle(mapSurface, 5.dp.toPx(), center, style = Stroke(2.5f))
                 drawCircle(ink, 5.dp.toPx(), center, style = Stroke(1f))
                 drawCircle(mapSurface, 1.5.dp.toPx(), center)
-                drawPointLabel("${names[tag] ?: "T"} ${p.x.fmt()}, ${p.y.fmt()}", center, 5.dp.toPx(), cyan.toArgb())
+                drawPointLabel("${names[tag] ?: "T"} ${p.x.fmt()}, ${p.y.fmt()}", center, 5.dp.toPx(), color.toArgb())
             }
         }
     }

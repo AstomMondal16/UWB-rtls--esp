@@ -291,3 +291,9 @@ Calibration references: [Qorvo DW1000 resources](https://www.qorvo.com/products/
 [Decawave antenna-delay guidance](https://forum.qorvo.com/t/antenna-delay-calibration/826/14),
 [thotro/arduino-dw1000](https://github.com/thotro/arduino-dw1000), and
 [Decawave/uwb-core](https://github.com/Decawave/uwb-core).
+
+## Timestamp clock source
+
+Choose `UWB ranging ? Timestamp clock source` in `idf.py menuconfig`. Phone / computer clock is the default and needs no Internet on the ESP. Optional API mode tries five HTTPS requests five seconds apart, then SNTP fallback. See [clock setup and timestamp meanings](components/time_sync/README.md).
+
+World Time API by [Time.Now](https://time.now/developer).

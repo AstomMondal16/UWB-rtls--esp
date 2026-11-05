@@ -4,9 +4,9 @@ if(CONFIG_UWB_TLS_ENABLE)
 endif()
 
 idf_component_register(
-    SRCS "telemetry.c"
+    SRCS "telemetry.c" "uwb_raw_json.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_http_server esp_https_server esp_timer lwip
+    REQUIRES esp_http_server esp_https_server esp_timer lwip uwb_ranging
     PRIV_REQUIRES dw1000
     EMBED_TXTFILES ${telemetry_tls_files}
 )

@@ -10,3 +10,8 @@ CONFIG_FREERTOS_TIMER_TASK_AFFINITY_CPU0=y
 
 # The BLE-enabled firmware needs the larger single-app partition.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# Time API mode verifies TLS certificate dates and runs HTTPS during startup.
+CONFIG_MBEDTLS_HAVE_TIME_DATE=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_UWB_TIME_SOURCE_PHONE=y

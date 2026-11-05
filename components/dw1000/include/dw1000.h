@@ -9,6 +9,9 @@
 #include "esp_err.h"
 #include "sdkconfig.h"
 
+/* Programmed TX_POWER register setting, not a measured dBm value. */
+#define DW1000_TX_POWER_SETTING UINT32_C(0x67676767)
+
 #define DW1000_TIMESTAMP_MASK ((1ULL << 40) - 1)
 
 esp_err_t dw1000_init(const uint8_t eui[8], uint16_t pan_id, uint16_t short_address,
@@ -23,6 +26,11 @@ esp_err_t dw1000_transmit(const void *data, size_t length,
 esp_err_t dw1000_receive(void *data, size_t capacity, size_t *length,
                          uint64_t *rx_time, uint32_t timeout_ms);
 float dw1000_receive_power(void);
+/* Sensing task only. Copies the unrounded register inputs from the last power read.
+ * Mask bit 0: CIR power, bit 1: RX_FINFO. No extra SPI is performed. */
+uint8_t dw1000_receive_power_inputs(uint16_t *cir_power, uint32_t *frame_info);
+/* Optional diagnostic read after a completed exchange; caller handles failure. */
+esp_err_t dw1000_read_receive_timestamp(uint64_t *timestamp);
 
 #ifdef CONFIG_UWB_CIR_ENABLE
 typedef struct {

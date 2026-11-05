@@ -57,6 +57,12 @@ def read_json_response(response, max_bytes):
     return json.loads(body.decode("utf-8"))
 
 
+def sync_system_clock(host, device_id, data):
+    if data.get("clock_source") == "phone" and data.get("device_time_unix_ms", 0) <= 0:
+        api_json(host + "/api/time", device_id, method="POST",
+                 body={"unix_ms": time.time_ns() // 1_000_000})
+
+
 def api_json(address, device_id, method="GET", body=None, max_bytes=MAX_TELEMETRY_BYTES):
     try:
         credentials = json.loads(os.environ["UWB_DEVICE_CREDENTIALS"])
@@ -71,11 +77,16 @@ def api_json(address, device_id, method="GET", body=None, max_bytes=MAX_TELEMETR
     parsed = urlsplit(address)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("The device API requires HTTPS")
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+    # Fetch only the public certificate, then pin it before sending any API data.
+    pem = ssl.get_server_certificate((parsed.hostname, parsed.port or 443), timeout=5.0)
+    actual = hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).digest()
+    if not hmac.compare_digest(actual, expected):
+        raise ssl.SSLError("Device TLS certificate fingerprint mismatch")
+    context = ssl.create_default_context(cadata=pem)
+    if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
     connection = HTTPSConnection(parsed.hostname, parsed.port or 443,
-                                 timeout=1.0, context=context)
+                                 timeout=5.0, context=context)
     try:
         headers = {"Cache-Control": "no-cache"}
         if body is not None:
@@ -813,6 +824,7 @@ class Dashboard:
                                 max_bytes=MAX_TELEMETRY_BYTES)
                 if stop_event.is_set():
                     return
+                sync_system_clock(host, device_id, data)
                 self.post("data", data, stop_event)
                 stop_event.wait(max(.05, data.get("send_interval_ms", 50) / 1000))
         except (OSError, URLError, ValueError, TimeoutError, json.JSONDecodeError) as error:

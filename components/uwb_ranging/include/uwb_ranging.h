@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "uwb_raw.h"
 
 typedef enum {
     UWB_RANGING_TAG,
@@ -14,6 +15,7 @@ typedef struct {
     uint16_t short_address;
     float range_m;
     float rx_power_dbm;
+    const uwb_raw_t *raw; /* Only valid for the duration of on_range(). */
 } uwb_ranging_peer_t;
 
 typedef void (*uwb_ranging_callback_t)(const uwb_ranging_peer_t *peer);

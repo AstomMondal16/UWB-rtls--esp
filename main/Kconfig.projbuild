@@ -35,6 +35,31 @@ config UWB_TLS_ENABLE
         must pin the certificate SHA-256 fingerprint. When disabled, the API
         uses plain HTTP for trusted local networks such as a phone hotspot.
 
+choice UWB_TIME_SOURCE
+    prompt "Timestamp clock source"
+    default UWB_TIME_SOURCE_PHONE
+    help
+        Select how the device obtains calendar time after power-on. The RTC
+        does not retain time through loss of power.
+
+    config UWB_TIME_SOURCE_PHONE
+        bool "Phone / computer clock (no Internet required on ESP)"
+        help
+            Start immediately. The Android app or desktop dashboard sends its
+            clock on connection. CSV uses the app receipt timestamp. Until a
+            client connects, the terminal explicitly displays uptime.
+
+    config UWB_TIME_SOURCE_API
+        bool "Time.Now HTTPS API, then SNTP fallback"
+        help
+            After Wi-Fi connects, try the Asia/Kolkata HTTPS time API five
+            times, with five seconds between failed attempts. Then try SNTP
+            for up to ten seconds. Start sensing afterward; if both sources
+            fail, request the phone/computer clock over the local network.
+            CSV uses the synchronized device snapshot clock
+            when available, otherwise the phone's receipt timestamp.
+endchoice
+
 menu "DW1000 GPIO pins"
 
 config UWB_DW1000_SCK_GPIO

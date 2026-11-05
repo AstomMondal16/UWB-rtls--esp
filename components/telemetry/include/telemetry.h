@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "uwb_raw.h"
 
 typedef struct {
     uint64_t timestamp_ms;
@@ -10,6 +11,7 @@ typedef struct {
     float distance_m;
     float speed_mps;
     float rx_power_dbm;
+    uwb_raw_t uwb_raw;
     bool imu_valid;
     float accel[3];
     float gyro[3];
@@ -34,6 +36,7 @@ typedef struct {
     uint32_t send_interval_ms;
     uint16_t antenna_delay;
     telemetry_control_callback_t on_control;
+    bool clock_synchronized;
 } telemetry_config_t;
 
 /* Starts the CPU0 queue consumer, HTTP API, and UDP MAC discovery service. */
@@ -48,3 +51,16 @@ void telemetry_update_imu(bool valid, const float accel[3],
 
 /* Battery readings are independent of UWB range samples. */
 void telemetry_update_battery(float voltage, float percent);
+
+/* Copies latest independent sensor values; return value indicates a valid UWB range.
+ * No SPI or I/O is performed. role must point to an 8-byte buffer. */
+bool telemetry_read_snapshot(telemetry_sample_t *sample, char role[8]);
+
+/* UTC system-clock milliseconds, or 0 until the selected source synchronizes. */
+int64_t telemetry_clock_unix_ms(void);
+
+/* Complete raw CIR JSON, or NULL on failure. Optional capture_valid reports valid I/Q. Caller frees(). */
+char *telemetry_copy_cir_json(bool *capture_valid);
+
+/* Raw JSON allocated for the caller to free(); missing_as_zero is for console presentation only. */
+char *telemetry_encode_uwb_raw_json(const uwb_raw_t *raw, bool missing_as_zero);

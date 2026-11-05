@@ -62,6 +62,9 @@ static uint16_t configured_antenna_delay;
 static spi_device_handle_t spi;
 static bool spi_bus_initialized;
 static bool correct_miso_shift;
+static uint8_t power_inputs_valid;
+static uint16_t power_input_cir;
+static uint32_t power_input_frame_info;
 
 #ifdef CONFIG_UWB_CIR_ENABLE
 static portMUX_TYPE cir_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -319,7 +322,7 @@ static esp_err_t configure_radio(const uint8_t eui[8], uint16_t pan_id,
     ESP_RETURN_ON_ERROR(write_le(REG_LDE_IF, 0x1806, 0x0607, 2), TAG, "LDE2");
     ESP_RETURN_ON_ERROR(write_le(REG_LDE_IF, 0x2804, 0x0666, 2), TAG, "LDE REPC");
     //
-    ESP_RETURN_ON_ERROR(write_le(REG_TX_POWER, NO_SUB, 0x67676767, 4), TAG, "TX power");    //channel 2, 110 kb/s, PRF 64 MHz, preamble 2048, code 10
+    ESP_RETURN_ON_ERROR(write_le(REG_TX_POWER, NO_SUB, DW1000_TX_POWER_SETTING, 4), TAG, "TX power");    //channel 2, 110 kb/s, PRF 64 MHz, preamble 2048, code 10
     //
     ESP_RETURN_ON_ERROR(write_le(REG_RF_CONF, 0x0b, 0xd8, 1), TAG, "RF RX");
     ESP_RETURN_ON_ERROR(write_le(REG_RF_CONF, 0x0c, 0x00045ca0, 4), TAG, "RF TX");
@@ -544,13 +547,34 @@ float dw1000_receive_power(void)
 {
     uint64_t cir_power = 0;
     uint64_t frame_info = 0;
-    if (read_le(REG_RX_FQUAL, 0x06, &cir_power, 2) != ESP_OK ||
-        read_le(REG_RX_FINFO, NO_SUB, &frame_info, 4) != ESP_OK) return NAN;
+    power_inputs_valid = 0;
+    if (read_le(REG_RX_FQUAL, 0x06, &cir_power, 2) != ESP_OK) return NAN;
+    power_input_cir = (uint16_t)cir_power;
+    power_inputs_valid |= 1;
+    if (read_le(REG_RX_FINFO, NO_SUB, &frame_info, 4) != ESP_OK) return NAN;
+    power_input_frame_info = (uint32_t)frame_info;
+    power_inputs_valid |= 2;
     uint16_t c = cir_power;
     uint16_t n = (frame_info >> 20) & 0x0fff;
     if (!c || !n) return NAN;
     float power = 10.0f * log10f((float)c * 131072.0f / ((float)n * n)) - 121.74f;
     return power <= -88.0f ? power : power + (power + 88.0f) * 1.1667f;
+}
+
+uint8_t dw1000_receive_power_inputs(uint16_t *cir_power, uint32_t *frame_info)
+{
+    if (!cir_power || !frame_info) return 0;
+    *cir_power = power_input_cir;
+    *frame_info = power_input_frame_info;
+    return power_inputs_valid;
+}
+
+esp_err_t dw1000_read_receive_timestamp(uint64_t *timestamp)
+{
+    if (!timestamp) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = read_le(REG_RX_TIME, 0x00, timestamp, 5);
+    if (err == ESP_OK) *timestamp &= DW1000_TIMESTAMP_MASK;
+    return err;
 }
 
 #ifdef CONFIG_UWB_CIR_ENABLE
