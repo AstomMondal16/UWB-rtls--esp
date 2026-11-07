@@ -7,14 +7,21 @@ same `MODE_LONGDATA_RANGE_ACCURACY` profile: channel 2, 110 kb/s, 64 MHz PRF,
 
 The startup and runtime flow is intentional:
 
-1. Connect to the configured Wi-Fi station and wait for `GOT_IP`.
-2. Read the timestamp, six-byte station MAC and IPv4 address.
-3. Start CPU0's buffered Wi-Fi telemetry/API service.
-4. Start UWB, IMU and battery sensing on CPU1 at the configured ranging period.
-5. Put each complete sample into a bounded queue; CPU0 consumes it and the PC
-   dashboard reads it over the same network.
+1. Connect using saved Wi-Fi credentials, or first-boot menuconfig credentials.
+   If neither is present, open BLE setup and wait for a successful connection.
+2. Synchronize time. API mode tries Time.Now five times, then SNTP. Phone mode,
+   or an API failure, exposes the local API and waits for the app/dashboard clock.
+3. After valid time and Wi-Fi are available, initialize enabled sensors, allow
+   one second for settling, then start anchor/tag ranging on CPU1. Failed IMU
+   initialization is reported and retried without stopping the other sensors.
+4. Pass range samples through the bounded queue to CPU0's telemetry service.
+5. Press the active-low GPIO17 setup button at any time to open BLE again.
+   Sensor tasks acknowledge a safe pause before BLE starts and resume afterward.
 
-ESP32-S3 uses both cores. Wi-Fi/HTTP and queue consumption run on CPU0 while
+See [startup and task coordination](STARTUP_FLOW.md) for the clock gate,
+semaphore ownership, buffer sizes, and hardware verification steps.
+
+ESP32-S3 uses both cores. Wi-Fi/HTTPS and queue consumption run on CPU0 while
 UWB/IMU/ADC sensing runs on CPU1. ESP32-C3 has one core, so the identical tasks
 run unpinned on that core.
 
@@ -29,7 +36,7 @@ also carried in bytes 80-85 of the existing 90-byte Arduino ranging frame.
 - `components/battery_monitor`: calibrated ADC1 battery voltage and percentage.
 - `components/ble_provisioning`: BLE provisioning manager and GPIO17 button request task.
 - `components/wifi`: saved Wi-Fi credentials, connection/recovery, and station-MAC identity.
-- `components/telemetry`: sample queue, HTTP API and UDP MAC discovery.
+- `components/telemetry`: sample queue, HTTPS API and UDP MAC discovery.
 - `main`: Kconfig values, callbacks and startup ordering.
 - `dashboard/dashboard.py`: standalone Python desktop visualization.
 - `dashboard/localization_dashboard.py`: multi-anchor device manager and 2D
@@ -126,6 +133,8 @@ After initialization, every successful range prints distance, receive power,
 radial speed, acceleration, angular velocity and battery state on one line.
 `Tag ranging period` and `Dashboard network interval` set the startup sensing
 and network request periods. Both can be changed at runtime from the dashboard.
+The Android app offers one **Samples per second** entry (1–20 whole target samples/s)
+instead of separate millisecond fields; see [sampling rate behavior](SAMPLING_RATE.md).
 The sensing interval must be changed on the tag because it initiates ranging.
 `Sensor-to-Wi-Fi buffer length` controls queue capacity; a full queue drops its
 oldest sample instead of delaying UWB.
@@ -141,11 +150,10 @@ The window is clamped to the 1016-sample accumulator boundaries. Set
 `CIR samples per capture` to 1016 for the full accumulator, and set
 `Minimum CIR capture interval` to 0 to capture every completed exchange.
 
-Read the latest snapshot using HTTP GET `http://DEVICE_IP/api/cir`, for example:
+Read the latest snapshot using HTTPS GET `https://DEVICE_IP/api/cir`. Trust the
+per-device certificate and use its matching IP; see [HTTPS setup](components/telemetry/TLS_SETUP.md). For example:
 
-```powershell
-Invoke-RestMethod http://192.168.1.42/api/cir | ConvertTo-Json -Depth 4
-```
+Use the app's CIR panel after adding the device on trusted private Wi-Fi.
 
 The response has `enabled` and `valid` flags. Once a capture succeeds, it also
 contains `sequence`, local monotonic `timestamp_ms`, `age_ms`, the 40-bit
@@ -297,3 +305,7 @@ Calibration references: [Qorvo DW1000 resources](https://www.qorvo.com/products/
 Choose `UWB ranging ? Timestamp clock source` in `idf.py menuconfig`. Phone / computer clock is the default and needs no Internet on the ESP. Optional API mode tries five HTTPS requests five seconds apart, then SNTP fallback. See [clock setup and timestamp meanings](components/time_sync/README.md).
 
 World Time API by [Time.Now](https://time.now/developer).
+
+HTTPS identities are generated automatically in C on each board. See [first-use HTTPS trust](components/telemetry/TLS_SETUP.md) and [customer setup](CUSTOMER_SETUP.md).
+
+Pause/Play now controls [UWB/IMU low-power sleep](SENSOR_POWER.md) while keeping Wi-Fi/HTTPS available for remote wake.

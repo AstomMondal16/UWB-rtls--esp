@@ -27,6 +27,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.security.keystore.KeyGenParameterSpec
@@ -811,7 +813,7 @@ private fun DashboardApp(
                                                         EmptyHint("Add at least three anchors in Devices and enter their measured coordinates to locate a tag.")
                                                     } else {
                                                         LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, snapshot.trails, fitMapRequest,
-                                                            Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(20.dp)), viewport = mapViewport)
+                                                            Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(16.dp)), viewport = mapViewport)
                                                         MapLegend()
                                                     }
                                                     snapshot.positions.entries.firstOrNull()?.let { (tag, p) ->
@@ -923,7 +925,7 @@ private fun DashboardApp(
                         EmptyHint("Add at least three anchors with measured coordinates in Devices to locate a tag.")
                     }
                 } else LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, snapshot.trails, fitMapRequest,
-                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)))
+                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)))
                 MapLegend()
                 Text("Pinch to zoom \u00b7 Drag to pan \u00b7 Double tap to fit", color = Muted, fontSize = 12.sp,
                     modifier = Modifier.padding(vertical = 8.dp))
@@ -1396,8 +1398,7 @@ private fun DevicePropertiesPage(
     onDeviceSelected: (String) -> Unit
 ) {
     var role by remember(device?.key) { mutableStateOf(device?.role ?: "anchor") }
-    var sensing by remember(device?.key) { mutableStateOf(sample?.optInt("sensing_interval_ms")?.takeIf { it > 0 }?.toString().orEmpty()) }
-    var sending by remember(device?.key) { mutableStateOf(sample?.optInt("send_interval_ms")?.takeIf { it > 0 }?.toString().orEmpty()) }
+    var rate by remember(device?.key) { mutableStateOf(SamplingRate.textFromInterval(sample?.optInt("sensing_interval_ms") ?: 0)) }
     var antenna by remember(device?.key) { mutableStateOf(sample?.optInt("antenna_delay")?.toString().orEmpty()) }
     var showDiagnostics by remember(device?.key) { mutableStateOf(false) }
     var dirty by remember(device?.key) { mutableStateOf(false) }
@@ -1407,8 +1408,7 @@ private fun DevicePropertiesPage(
     LaunchedEffect(device?.key, sample?.optInt("sensing_interval_ms"), sample?.optInt("send_interval_ms"), sample?.optInt("antenna_delay")) {
         if (!dirty) {
             role = sample?.optString("role")?.takeIf { it == "tag" || it == "anchor" } ?: device?.role ?: "anchor"
-            sensing = sample?.optInt("sensing_interval_ms")?.takeIf { it > 0 }?.toString().orEmpty()
-            sending = sample?.optInt("send_interval_ms")?.takeIf { it > 0 }?.toString().orEmpty()
+            rate = SamplingRate.textFromInterval(sample?.optInt("sensing_interval_ms") ?: 0)
             antenna = sample?.optInt("antenna_delay")?.toString().orEmpty()
         }
     }
@@ -1428,27 +1428,33 @@ private fun DevicePropertiesPage(
         Text("The firmware validates these values before applying them.", color = Muted, fontSize = 14.sp)
         Text("Device role", color = Ink, fontSize = 14.sp)
         PreferenceChoices(listOf("anchor", "tag"), role) { role = it; dirty = true }
-        NumericField("Acquisition interval (20–60000 ms)", sensing, { sensing = it; dirty = true }, Modifier.fillMaxWidth())
-        NumericField("Reporting interval (50–60000 ms)", sending, { sending = it; dirty = true }, Modifier.fillMaxWidth())
+        val rateInvalid = SamplingRate.intervalMs(rate) == null
+        OutlinedTextField(value = rate, onValueChange = { rate = it; dirty = true; validation = ""; applyStatus = "" },
+            label = { Text("Samples per second") },
+            supportingText = { Text(if (dirty && rateInvalid) SamplingRate.ERROR else "Whole numbers only: 1–20 samples/s") },
+            isError = dirty && rateInvalid, singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth())
+        Text("This sets a target for UWB and IMU. Actual UWB readings can be slower with weak signals, several anchors or full CIR capture.",
+            color = Warning, fontSize = 12.sp, lineHeight = 16.sp)
+        if (role == "anchor") Text("Set this rate on the tag too. UWB cycles are shared between its anchors.",
+            color = Muted, fontSize = 12.sp, lineHeight = 16.sp)
         NumericField("Antenna delay (0–65535 DTU)", antenna, { antenna = it; dirty = true }, Modifier.fillMaxWidth())
         if (validation.isNotBlank()) Text(validation, color = Danger, fontSize = 14.sp)
         if (applyStatus.isNotBlank()) Text(applyStatus, color = Muted, fontSize = 14.sp)
         Button(shape = MaterialTheme.shapes.medium, onClick = {
-            val sense = sensing.toIntOrNull()
-            val send = sending.toIntOrNull()
+            val rateFields = SamplingRate.controlFields(rate)
             val delay = antenna.toIntOrNull()
             validation = when {
                 ip.isBlank() -> "This device has no IP address. Connect it to Wi-Fi first."
-                sense == null || sense !in 20..60000 -> "Acquisition interval must be 20–60000 ms."
-                send == null || send !in 50..60000 -> "Reporting interval must be 50–60000 ms."
+                rateFields == null -> SamplingRate.ERROR
                 delay == null || delay !in 0..65535 -> "Antenna delay must be 0–65535 DTU."
                 else -> ""
             }
             if (validation.isBlank()) {
                 applying = true
                 applyStatus = "Sending supported settings…"
-                val body = JSONObject().put("role", role).put("sensing_interval_ms", sense)
-                    .put("send_interval_ms", send).put("antenna_delay", delay)
+                val body = requireNotNull(rateFields).put("role", role).put("antenna_delay", delay)
                 onApply(device.copy(role = role), body) { response ->
                     applying = false
                     val success = runCatching { JSONObject(response).optBoolean("ok") }.getOrDefault(false)
@@ -1457,7 +1463,7 @@ private fun DevicePropertiesPage(
                     if (success) dirty = false
                 }
             }
-        }, enabled = !applying && ip.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+        }, enabled = !applying && ip.isNotBlank() && !rateInvalid, modifier = Modifier.fillMaxWidth()) {
             Text(if (applying) "Applying…" else "Apply changes")
         }
         Spacer(Modifier.height(16.dp))
@@ -1635,7 +1641,7 @@ private fun BatteryGlyph(percent: Float, tint: Color, modifier: Modifier, reduce
 private fun DashboardGroup(withContainers: Boolean, content: @Composable ColumnScope.() -> Unit) {
     if (withContainers) {
         Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface),
-            shape = RoundedCornerShape(20.dp), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
+            shape = RoundedCornerShape(16.dp), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
             Column(Modifier.fillMaxWidth().padding(16.dp), content = content)
         }
     } else Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 8.dp), content = content)
@@ -1675,7 +1681,7 @@ private fun DevicesPage(snapshot: DashboardSnapshot, names: Map<String, String>,
                 }
                 TextButton(onClick = onWifiSetup) { InstrumentIcon("wifi", LocalContentColor.current, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Wi-Fi setup") }
             }
-            Text("Add devices, assign roles, and set measured X/Y/Z map coordinates.", color = Muted, fontSize = 12.sp,
+            Text("Add devices and set their positions. Pair new devices only on trusted private Wi-Fi.", color = Muted, fontSize = 12.sp,
                 modifier = Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(12.dp))
             Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1719,7 +1725,7 @@ private fun DevicesPage(snapshot: DashboardSnapshot, names: Map<String, String>,
                         modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
                 }
                 items(available, key = { "found-${it.mac}" }) { found ->
-                    Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(20.dp)) {
+                    Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(16.dp)) {
                         Column(Modifier.fillMaxWidth().padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             SelectionContainer {
@@ -1748,13 +1754,15 @@ private fun DevicesPage(snapshot: DashboardSnapshot, names: Map<String, String>,
 
 
 internal data class SavedWifiCredentials(val ssid: String = "", val password: String = "")
-internal data class DeviceSecurity(val tlsFingerprint: String = "", val requireHttps: Boolean = false, val loadError: String = "")
+internal data class DeviceSecurity(val tlsFingerprint: String = "", val requireHttps: Boolean = true, val loadError: String = "",
+                                   val trustedPublicKeyPin: String = "", val resetTrust: Boolean = false, val transportRevision: String = "")
 
 internal object LastWifiCredentialStore {
     private const val PREFS = "wifi_provisioning"
     private const val VALUE = "last_credentials"
     private const val KEY_ALIAS = "uwb_wifi_credentials_v1"
     private const val IV_LENGTH = 12
+    private val failedSecurityWrites = mutableSetOf<String>()
 
     fun load(context: android.content.Context): SavedWifiCredentials {
         val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
@@ -1788,7 +1796,9 @@ internal object LastWifiCredentialStore {
         false
     }
 
+    @Synchronized
     fun loadDeviceSecurity(context: android.content.Context, mac: String): DeviceSecurity {
+        if (deviceIdentity(mac) in failedSecurityWrites) return DeviceSecurity(loadError = "Device identity could not be saved. Fix storage and pair again explicitly.")
         val value = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
             .getString("device_${deviceIdentity(mac)}", null) ?: return DeviceSecurity()
         return try {
@@ -1798,35 +1808,46 @@ internal object LastWifiCredentialStore {
             cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(),
                 GCMParameterSpec(128, packed.copyOfRange(0, IV_LENGTH)))
             val json = JSONObject(String(cipher.doFinal(packed.copyOfRange(IV_LENGTH, packed.size)), Charsets.UTF_8))
-            DeviceSecurity(json.optString("tls_fingerprint"), json.optBoolean("require_https"))
+            DeviceSecurity(json.optString("tls_fingerprint"), json.optBoolean("require_https", true),
+                trustedPublicKeyPin = json.optString("trusted_public_key"), transportRevision = value)
         } catch (_: Exception) {
             DeviceSecurity(requireHttps = true, loadError = "Saved TLS settings could not be read. Re-enter device connection settings.")
         }
     }
 
+    @Synchronized
     fun saveDeviceSecurity(context: android.content.Context, mac: String,
                            security: DeviceSecurity): Boolean = try {
-        val key = "device_${deviceIdentity(mac)}"
-        if (security.tlsFingerprint.isBlank() && !security.requireHttps) {
-            context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
-                .remove(key).apply()
-        } else {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-            val plaintext = JSONObject().put("tls_fingerprint", security.tlsFingerprint.trim()).put("require_https", security.requireHttps)
-                .toString().toByteArray(Charsets.UTF_8)
-            val packed = cipher.iv + cipher.doFinal(plaintext)
-            context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
-                .putString(key, Base64.encodeToString(packed, Base64.NO_WRAP)).apply()
-        }
-        true
+        val existing = loadDeviceSecurity(context, mac)
+        check(existing.loadError.isBlank() || security.resetTrust) { existing.loadError }
+        val pin = mergeDeviceTrust(existing.trustedPublicKeyPin, security.trustedPublicKeyPin, security.resetTrust)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+        val plaintext = JSONObject().put("tls_fingerprint", security.tlsFingerprint.trim()).put("require_https", true)
+            .put("trusted_public_key", pin).toString().toByteArray(Charsets.UTF_8)
+        val packed = cipher.iv + cipher.doFinal(plaintext)
+        val saved = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+            .putString("device_${deviceIdentity(mac)}", Base64.encodeToString(packed, Base64.NO_WRAP)).commit()
+        if (saved) failedSecurityWrites.remove(deviceIdentity(mac)) else failedSecurityWrites.add(deviceIdentity(mac))
+        saved
     } catch (_: Exception) {
+        failedSecurityWrites.add(deviceIdentity(mac))
         false
+    }
+
+    @Synchronized
+    fun acceptDeviceIdentity(context: android.content.Context, mac: String, candidate: String) {
+        val saved = loadDeviceSecurity(context, mac)
+        if (saved.loadError.isNotBlank()) throw java.security.cert.CertificateException(saved.loadError)
+        requireFirstUseKey(saved.trustedPublicKeyPin, candidate) {
+            saveDeviceSecurity(context, mac, saved.copy(trustedPublicKeyPin = candidate))
+        }
     }
 
     private fun deviceIdentity(value: String): String =
         normalizeMac(value).ifBlank { value.trim().lowercase(Locale.ROOT) }
 
+    @Synchronized
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         try {
@@ -1849,13 +1870,15 @@ private data class BleProvisionTarget(val device: BluetoothDevice, val serviceUu
 
 private class ProvisionConnectionObserver(
     private val onConnected: () -> Unit,
-    private val onFailed: (String) -> Unit
+    private val onFailed: (String) -> Unit,
+    private val onDisconnected: () -> Unit
 ) {
     @Subscribe(threadMode = ThreadMode.MAIN)
     fun onConnectionEvent(event: DeviceConnectionEvent) {
         when (event.eventType) {
             ESPConstants.EVENT_DEVICE_CONNECTED -> onConnected()
             ESPConstants.EVENT_DEVICE_CONNECTION_FAILED -> onFailed("Could not connect to the device")
+            ESPConstants.EVENT_DEVICE_DISCONNECTED -> onDisconnected()
         }
     }
 }
@@ -1879,27 +1902,69 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
         onDismiss()
     }
     var deviceStatus by remember { mutableStateOf("Searching for nearby provisioning devices…") }
-    var wifiStatus by remember { mutableStateOf("") }
+    var provisioning by remember { mutableStateOf(WifiProvisioningState()) }
+    val wifiStatus = provisioning.message
+    val sending = provisioning.sending
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    var alive by remember { mutableStateOf(true) }
     var scanning by remember { mutableStateOf(true) }
-    var sending by remember { mutableStateOf(false) }
     var bleConnected by remember { mutableStateOf(false) }
     var activeDevice by remember { mutableStateOf<ESPDevice?>(null) }
     var showPassword by remember { mutableStateOf(false) }
+    // The SDK also invokes listeners from its transport thread.
+    fun updateProvision(id: Long, text: String, success: Boolean? = null) {
+        mainHandler.post {
+            if (alive) provisioning = if (success == null) provisioning.progress(id, text)
+                else provisioning.complete(id, success, text)
+        }
+    }
     val observer = remember {
         ProvisionConnectionObserver(
-            onConnected = { bleConnected = true; wifiStatus = ""; deviceStatus = "Connected. Enter the Wi-Fi network name and password." },
-            onFailed = { bleConnected = false; wifiStatus = ""; deviceStatus = it }
+            onConnected = {
+                bleConnected = true
+                if (!provisioning.sending && !provisioning.confirmed) {
+                    provisioning = provisioning.reset()
+                    deviceStatus = "Device connected"
+                }
+            },
+            onFailed = { message ->
+                bleConnected = false
+                if (provisioning.sending) {
+                    provisioning = provisioning.complete(provisioning.attempt, false, message)
+                } else if (!provisioning.confirmed) {
+                    deviceStatus = message
+                }
+            },
+            onDisconnected = {
+                bleConnected = false
+                provisioning = provisioning.disconnected()
+                deviceStatus = "Bluetooth disconnected. Choose the device again to retry."
+            }
         )
     }
     DisposableEffect(Unit) {
         EventBus.getDefault().register(observer)
         onDispose {
+            alive = false
+            mainHandler.removeCallbacksAndMessages(null)
             EventBus.getDefault().unregister(observer)
             activeDevice?.disconnectDevice()
         }
     }
+    LaunchedEffect(provisioning.attempt, sending) {
+        if (sending) {
+            val id = provisioning.attempt
+            delay(WifiProvisioningState.TIMEOUT_MS)
+            if (provisioning.attempt == id && provisioning.sending) {
+                provisioning = provisioning.timedOut(id)
+                bleConnected = false
+                activeDevice?.disconnectDevice()
+            }
+        }
+    }
     val scan = {
         devices = emptyList()
+        provisioning = provisioning.reset()
         scanning = true
         deviceStatus = "Searching for nearby provisioning devices…"
         manager.searchBleEspDevices(object : BleScanListener {
@@ -1918,8 +1983,8 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
             }
             override fun scanCompleted() {
                 scanning = false
-                if (devices.isEmpty()) deviceStatus = "No provisioning device found. Check power and try again."
-                else deviceStatus = "Select the UWB device to connect."
+                if (devices.isEmpty()) deviceStatus = "No device found. Power it on or press its setup button, then scan again."
+                else deviceStatus = "Choose your device"
             }
             override fun onFailure(e: Exception) {
                 scanning = false
@@ -1935,16 +2000,15 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Device Wi-Fi", color = Ink, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f))
-                    TextButton(onClick = ::dismissDialog) { Text("Close") }
+                    TextButton(onClick = ::dismissDialog) { Text(if (provisioning.confirmed) "Done" else "Close") }
                 }
-                Text("Use a Wi-Fi network shared by your phone and UWB devices. If using your phone's hotspot, keep it enabled during setup.",
+                Text("Power on the device. A new device enters Bluetooth setup automatically. To change its Wi-Fi, press the device's setup button. Use the same Wi-Fi as your phone; keep a phone hotspot enabled during setup.",
                     color = Muted, fontSize = 14.sp)
                 Text("1. Choose a UWB device", color = Ink, style = MaterialTheme.typography.titleSmall)
                 OutlinedButton(shape = MaterialTheme.shapes.medium,
-                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = scan, enabled = !scanning, modifier = Modifier.fillMaxWidth()) {
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = scan, enabled = !scanning && !sending, modifier = Modifier.fillMaxWidth()) {
                     Text(if (scanning) "Scanning…" else "Scan for UWB devices")
                 }
-                FeedbackMessage(deviceStatus, busy = scanning)
                 if (devices.isNotEmpty()) {
                     LazyColumn(Modifier.height(128.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         items(devices) { target ->
@@ -1953,7 +2017,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                             OutlinedButton(shape = MaterialTheme.shapes.medium,
                     colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(disabledContentColor = Muted), onClick = {
                                 bleConnected = false
-                                wifiStatus = ""
+                                provisioning = provisioning.reset()
                                 deviceStatus = "Connecting to " + deviceLabel + "…"
                                 val esp = manager.createESPDevice(ESPConstants.TransportType.TRANSPORT_BLE,
                                     ESPConstants.SecurityType.SECURITY_1)
@@ -1962,7 +2026,7 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                                 esp.setPrimaryServiceUuid(target.serviceUuid)
                                 activeDevice = esp
                                 esp.connectBLEDevice(target.device, target.serviceUuid)
-                            }, modifier = Modifier.fillMaxWidth()) {
+                            }, enabled = !sending, modifier = Modifier.fillMaxWidth()) {
                                 Text(deviceLabel, maxLines = 1,
                                     overflow = TextOverflow.Ellipsis)
                             }
@@ -1971,10 +2035,10 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                 }
                 Text("2. Connect it to Wi-Fi", color = Ink, style = MaterialTheme.typography.titleSmall)
                 OutlinedTextField(value = ssid, onValueChange = { ssid = it }, label = { Text("Wi-Fi network name") },
-                    shape = MaterialTheme.shapes.small, singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    shape = MaterialTheme.shapes.small, enabled = !sending, singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                     modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Wi-Fi password") },
-                    shape = MaterialTheme.shapes.small, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                    shape = MaterialTheme.shapes.small, enabled = !sending, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                     visualTransformation = if (showPassword) androidx.compose.ui.text.input.VisualTransformation.None
                         else androidx.compose.ui.text.input.PasswordVisualTransformation(),
@@ -1984,54 +2048,62 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
                         }) { InstrumentIcon(if (showPassword) "eyeOff" else "eye", Muted) }
                     },
                     modifier = Modifier.fillMaxWidth())
-                if (wifiStatus.isNotBlank()) FeedbackMessage(wifiStatus, busy = sending)
-                if (!bleConnected) Text("Connect to a nearby UWB device to enable credential transfer", color = Muted, fontSize = 14.sp)
+                if (!bleConnected && !provisioning.confirmed) Text("Choose a device above before connecting to Wi-Fi", color = Muted, fontSize = 14.sp)
                 Button(shape = MaterialTheme.shapes.medium,
                     colors = androidx.compose.material3.ButtonDefaults.buttonColors(disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant, disabledContentColor = Muted), onClick = {
                     focusManager.clearFocus()
                     LastWifiCredentialStore.save(context, ssid, password)
                     val esp = activeDevice
                     if (esp == null || !bleConnected || ssid.isBlank()) {
-                        wifiStatus = if (esp == null || !bleConnected) "Select and connect to a device first" else "Enter the Wi-Fi network name"
+                        provisioning = provisioning.copy(message = if (esp == null || !bleConnected) "Select and connect to a device first" else "Enter the Wi-Fi network name")
                         return@Button
                     }
                     if (ssid.trim().toByteArray(Charsets.UTF_8).size !in 1..32) {
-                        wifiStatus = "Wi-Fi network name must be 1 to 32 bytes"
+                        provisioning = provisioning.copy(message = "Wi-Fi network name must be 1 to 32 bytes")
                         return@Button
                     }
                     val passwordBytes = password.toByteArray(Charsets.UTF_8)
                     if (passwordBytes.isNotEmpty() && passwordBytes.size !in 8..63 &&
                         !(passwordBytes.size == 64 && password.all { it.digitToIntOrNull(16) != null })) {
-                        wifiStatus = "Use an open network, an 8-63 character password, or a 64-digit hexadecimal key"
+                        provisioning = provisioning.copy(message = "Use an open network, an 8-63 character password, or a 64-digit hexadecimal key")
                         return@Button
                     }
-                    sending = true
-                    wifiStatus = "Sending credentials and waiting for Wi-Fi…"
-                    esp.provision(ssid.trim(), password, object : ProvisionListener {
-                        override fun createSessionFailed(e: Exception) {
-                            sending = false; wifiStatus = "Could not create secure session: " + (e.localizedMessage ?: "")
-                        }
-                        override fun wifiConfigSent() { wifiStatus = "Credentials sent securely to the device" }
-                        override fun wifiConfigFailed(e: Exception) {
-                            sending = false; wifiStatus = "Could not send credentials: " + (e.localizedMessage ?: "")
-                        }
-                        override fun wifiConfigApplied() { wifiStatus = "Credentials received; testing the Wi-Fi connection…" }
-                        override fun wifiConfigApplyFailed(e: Exception) {
-                            sending = false; wifiStatus = "Wi-Fi connection failed. Device attempted to restore its previous network; verify its connection."
-                        }
-                        override fun provisioningFailedFromDevice(failureReason: ESPConstants.ProvisionFailureReason) {
-                            sending = false; wifiStatus = "Wi-Fi connection failed (" + failureReason + "). Device attempted to restore its previous network; verify its connection."
-                        }
-                        override fun deviceProvisioningSuccess() {
-                            sending = false; wifiStatus = "Wi-Fi connected. Device setup is complete."
-                        }
-                        override fun onProvisioningFailed(e: Exception) {
-                            sending = false; wifiStatus = "Provisioning failed: " + (e.localizedMessage ?: "unknown error")
-                        }
-                    })
-                }, enabled = !sending && bleConnected && ssid.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                    Text(if (sending) "Connecting…" else "Send Wi-Fi credentials")
+                    provisioning = provisioning.begin()
+                    val id = provisioning.attempt
+                    try {
+                        esp.provision(ssid.trim(), password, object : ProvisionListener {
+                            override fun createSessionFailed(e: Exception) {
+                                updateProvision(id, "Could not create secure session: " + (e.localizedMessage ?: ""), false)
+                            }
+                            override fun wifiConfigSent() {
+                                updateProvision(id, "Credentials sent securely to the device")
+                            }
+                            override fun wifiConfigFailed(e: Exception) {
+                                updateProvision(id, "Could not send credentials: " + (e.localizedMessage ?: ""), false)
+                            }
+                            override fun wifiConfigApplied() {
+                                updateProvision(id, "Credentials received; testing the Wi-Fi connection\u2026")
+                            }
+                            override fun wifiConfigApplyFailed(e: Exception) {
+                                updateProvision(id, "Wi-Fi connection failed. Device attempted to restore its previous network; verify its connection.", false)
+                            }
+                            override fun provisioningFailedFromDevice(failureReason: ESPConstants.ProvisionFailureReason) {
+                                updateProvision(id, "Wi-Fi connection failed (" + failureReason + "). Device attempted to restore its previous network; verify its connection.", false)
+                            }
+                            override fun deviceProvisioningSuccess() {
+                                updateProvision(id, "Wi-Fi connected. Add this device from Scan network to finish setup.", true)
+                            }
+                            override fun onProvisioningFailed(e: Exception) {
+                                updateProvision(id, "Provisioning failed: " + (e.localizedMessage ?: "unknown error"), false)
+                            }
+                        })
+                    } catch (e: Exception) {
+                        updateProvision(id, "Could not start Wi-Fi setup: " + (e.localizedMessage ?: "unknown error"), false)
+                    }
+                }, enabled = !sending && !provisioning.confirmed && bleConnected && ssid.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+                    Text(if (sending) "Connecting\u2026" else if (provisioning.confirmed) "Wi-Fi connected" else "Connect to Wi-Fi")
                 }
+                FeedbackMessage(wifiStatus.ifBlank { deviceStatus }, busy = scanning || sending)
             }
         }
     }
@@ -2089,7 +2161,7 @@ private fun ConfigurationDeviceRow(device: DeviceRecord, name: String, state: De
         else -> Muted
     }
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(20.dp)) {
+        shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2365,7 +2437,7 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
 @Composable
 private fun SectionCard(title: String, headerAction: (@Composable () -> Unit)? = null,
                         content: @Composable ColumnScope.() -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(20.dp), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
+    Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(16.dp), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
         Column(Modifier.fillMaxWidth().padding(16.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium,
@@ -2390,7 +2462,8 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
     var z by remember(device) { mutableStateOf(device?.z?.toString() ?: "0") }
     var yaw by remember(device) { mutableStateOf(device?.yawOffset?.toString() ?: "0") }
     var tlsFingerprint by remember(device) { mutableStateOf(initialSecurity.tlsFingerprint) }
-    var requireHttps by remember(device) { mutableStateOf(initialSecurity.requireHttps) }
+    var resetTrust by remember(device) { mutableStateOf(false) }
+    var confirmTrustReset by remember(device) { mutableStateOf(false) }
     var error by remember { mutableStateOf(initialSecurity.loadError) }
     fun record(): DeviceRecord? {
         val values = listOf(x.toDoubleOrNull(), y.toDoubleOrNull(), z.toDoubleOrNull(), yaw.toDoubleOrNull())
@@ -2413,15 +2486,15 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
                     NumericField("Z (m)", z, { z = it }, Modifier.weight(1f))
                     NumericField("Yaw offset°", yaw, { yaw = it }, Modifier.weight(1f))
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = requireHttps || tlsFingerprint.isNotBlank(),
-                        onCheckedChange = { requireHttps = it }, enabled = tlsFingerprint.isBlank())
-                    Text("Require HTTPS")
+                Text("HTTPS pairs automatically on first use. Add devices only on your trusted private Wi-Fi. Later identity changes are blocked.", style = MaterialTheme.typography.bodySmall, color = Muted)
+                Text(if (resetTrust || initialSecurity.trustedPublicKeyPin.isBlank()) "Secure pairing: not paired yet" else "Secure pairing: identity saved",
+                    style = MaterialTheme.typography.bodySmall, color = Muted)
+                if (!resetTrust && (initialSecurity.trustedPublicKeyPin.isNotBlank() || initialSecurity.loadError.isNotBlank())) {
+                    TextButton(onClick = { confirmTrustReset = true }) { Text("Pair again") }
                 }
-                Text("HTTPS is automatic for TLS-capable devices. Older firmware uses local HTTP. A verified HTTPS device never falls back to HTTP.", style = MaterialTheme.typography.bodySmall, color = Muted)
                 OutlinedTextField(tlsFingerprint, { tlsFingerprint = it },
-                    label = { Text("TLS fingerprint (optional)") },
-                    supportingText = { Text("Self-signed certificate SHA-256. Its IP subjectAltName must match this address. Blank uses system trust for HTTPS.") }, shape = MaterialTheme.shapes.small, singleLine = true,
+                    label = { Text("Legacy certificate fingerprint (optional)") },
+                    supportingText = { Text("Leave blank for automatic pairing. For older firmware only: a manual certificate fingerprint also requires a matching IP subjectAltName.") }, shape = MaterialTheme.shapes.small, singleLine = true,
                     modifier = Modifier.fillMaxWidth())
                 if (error.isNotBlank()) Text(error, color = Danger, fontSize = 12.sp)
             }
@@ -2431,9 +2504,15 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
             if (fingerprint.isNotBlank() && (fingerprint.length != 64 || fingerprint.any { it.digitToIntOrNull(16) == null })) {
                 error = "Fingerprint must be blank or 64 hexadecimal characters"; return@TextButton
             }
-            record()?.let { onSave(it, DeviceSecurity(fingerprint.uppercase(Locale.ROOT), requireHttps)) }
+            record()?.let { onSave(it, DeviceSecurity(fingerprint.uppercase(Locale.ROOT), requireHttps = true,
+                trustedPublicKeyPin = initialSecurity.trustedPublicKeyPin, resetTrust = resetTrust)) }
         }) { Text("Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    if (confirmTrustReset) AlertDialog(onDismissRequest = { confirmTrustReset = false },
+        title = { Text("Pair this device again?") },
+        text = { Text("Saving will forget the old identity and trust the next connection. Do this only after an expected device reset, on your trusted private Wi-Fi.") },
+        confirmButton = { TextButton(onClick = { resetTrust = true; error = ""; confirmTrustReset = false }) { Text("Pair again") } },
+        dismissButton = { TextButton(onClick = { confirmTrustReset = false }) { Text("Cancel") } })
 }
 
 @Composable

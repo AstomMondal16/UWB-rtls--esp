@@ -47,7 +47,7 @@ enum {
     REG_AGC_TUNE = 0x23, REG_ACC_MEM = 0x25,
     REG_GPIO_CTRL = 0x26, REG_DRX_TUNE = 0x27,
     REG_RF_CONF = 0x28,
-    REG_TX_CAL = 0x2a, REG_FS_CTRL = 0x2b, REG_OTP_IF = 0x2d,
+    REG_TX_CAL = 0x2a, REG_FS_CTRL = 0x2b, REG_AON = 0x2c, REG_OTP_IF = 0x2d,
     REG_LDE_IF = 0x2e, REG_PMSC = 0x36,
 };
 
@@ -61,6 +61,7 @@ static const char *TAG = "dw1000";
 static uint16_t configured_antenna_delay;
 static spi_device_handle_t spi;
 static bool spi_bus_initialized;
+static bool radio_sleeping;
 static bool correct_miso_shift;
 static uint8_t power_inputs_valid;
 static uint16_t power_input_cir;
@@ -90,6 +91,7 @@ static size_t make_header(uint8_t reg, uint16_t sub, bool write, uint8_t out[3])
 
 static esp_err_t reg_write(uint8_t reg, uint16_t sub, const void *data, size_t len)
 {
+    if (radio_sleeping) return ESP_ERR_INVALID_STATE;
     if (len > UWB_SPI_MAX_DATA) return ESP_ERR_INVALID_SIZE;
     uint8_t tx[3 + UWB_SPI_MAX_DATA];
     size_t header_len = make_header(reg, sub, true, tx);
@@ -107,6 +109,7 @@ static esp_err_t reg_write(uint8_t reg, uint16_t sub, const void *data, size_t l
 
 static esp_err_t reg_read(uint8_t reg, uint16_t sub, void *data, size_t len)
 {
+    if (radio_sleeping) return ESP_ERR_INVALID_STATE;
     if (len > UWB_SPI_MAX_DATA) return ESP_ERR_INVALID_SIZE;
     uint8_t header[3];
     uint8_t raw[UWB_SPI_MAX_DATA];
@@ -210,6 +213,37 @@ static esp_err_t force_idle(void)
 static esp_err_t clear_status(void)
 {
     return write_le(REG_SYS_STATUS, NO_SUB, DW1000_TIMESTAMP_MASK, 5);
+}
+
+esp_err_t dw1000_enter_deep_sleep(void)
+{
+    if (!spi) return ESP_ERR_INVALID_STATE;
+    if (radio_sleeping) return ESP_OK;
+    ESP_RETURN_ON_ERROR(force_idle(), TAG, "sleep idle");
+    ESP_RETURN_ON_ERROR(clear_status(), TAG, "sleep clear status");
+    // No automatic restore: wake performs the normal reset/tuning/antenna setup.
+    ESP_RETURN_ON_ERROR(write_le(REG_AON, 0x00, 0, 2), TAG, "sleep wake config");
+    ESP_RETURN_ON_ERROR(write_le(REG_AON, 0x0a, 0, 2), TAG, "disable sleep counter");
+    ESP_RETURN_ON_ERROR(write_le(REG_AON, 0x06, 0x05, 4), TAG, "SPI wake and deep sleep enable");
+    ESP_RETURN_ON_ERROR(write_le(REG_AON, 0x02, 0, 1), TAG, "clear AON control");
+    ESP_RETURN_ON_ERROR(write_le(REG_AON, 0x02, 0x02, 1), TAG, "save and sleep");
+    radio_sleeping = true;
+    power_inputs_valid = 0;
+#ifdef CONFIG_UWB_CIR_ENABLE
+    portENTER_CRITICAL(&cir_lock);
+    cir_valid = false;
+    portEXIT_CRITICAL(&cir_lock);
+#endif
+    return ESP_OK;
+}
+
+static void wake_spi(void)
+{
+    gpio_set_level(UWB_PIN_CS, 0);
+    esp_rom_delay_us(600); // DW1000 requires more than 500 us on CS to wake.
+    gpio_set_level(UWB_PIN_CS, 1);
+    esp_rom_delay_us(5000);
+    radio_sleeping = false;
 }
 
 static esp_err_t set_clock(uint8_t clock)
@@ -357,6 +391,7 @@ static esp_err_t dw1000_init_impl(const uint8_t eui[8], uint16_t pan_id,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&cs_output), TAG, "CS pin");
     gpio_set_level(UWB_PIN_CS, 1);
+    wake_spi();
 
     ESP_RETURN_ON_ERROR(spi_bus_init(), TAG, "SPI bus initialization");
     uint32_t id = 0;

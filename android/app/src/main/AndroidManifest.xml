@@ -17,7 +17,7 @@
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@drawable/uwb_localization_logo"
         android:label="@string/app_name"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:roundIcon="@drawable/uwb_localization_logo"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">

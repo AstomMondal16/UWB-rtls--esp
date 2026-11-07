@@ -115,7 +115,7 @@ static void manager_event(void *arg, network_prov_cb_event_t event, void *data)
         break;
     case NETWORK_PROV_WIFI_CRED_SUCCESS:
         notify_app(BLE_PROVISIONING_CREDENTIALS_SUCCESS, NULL);
-        request_stop(SENSOR_COORDINATOR_BLE_FINISHED);
+        /* SDK auto-stop waits for the client's connected-status reply. */
         break;
     case NETWORK_PROV_WIFI_CRED_FAIL: {
         esp_err_t err = network_prov_mgr_reset_wifi_sm_state_on_failure();
@@ -272,7 +272,6 @@ esp_err_t ble_provisioning_init(const char *name,
     };
     esp_err_t err = network_prov_mgr_init(config);
     bool manager_initialized = err == ESP_OK;
-    if (err == ESP_OK) err = network_prov_mgr_disable_auto_stop(1000);
     gpio_config_t button = {
         .pin_bit_mask = 1ULL << BUTTON_GPIO,
         .mode = GPIO_MODE_INPUT,

@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -14,7 +15,6 @@
 #define ACK_IMU   BIT3
 #define PAUSE_BATTERY BIT4
 #define ACK_BATTERY   BIT5
-#define SENSOR_ACKS (ACK_UWB | ACK_IMU | ACK_BATTERY)
 
 static const char *TAG = "task_manager";
 static EventGroupHandle_t sync_events;
@@ -91,24 +91,58 @@ esp_err_t sensor_coordinator_register(uint32_t sensor)
     return ESP_OK;
 }
 
+void sensor_coordinator_notify(uint32_t sensors)
+{
+    if (!state_mutex || xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) return;
+    TaskHandle_t tasks[3] = {
+        (sensors & SENSOR_COORDINATOR_UWB) ? sensor_tasks[0] : NULL,
+        (sensors & SENSOR_COORDINATOR_IMU) ? sensor_tasks[1] : NULL,
+        (sensors & SENSOR_COORDINATOR_BATTERY) ? sensor_tasks[2] : NULL,
+    };
+    xSemaphoreGive(state_mutex);
+    wake_registered_sensors(tasks);
+}
+
+void sensor_coordinator_wait_period(uint32_t period_ms, int64_t cycle_started_us)
+{
+    int64_t remaining_us = (int64_t)period_ms * 1000 -
+                           (esp_timer_get_time() - cycle_started_us);
+    TickType_t ticks = remaining_us > 0
+        ? (TickType_t)((remaining_us * configTICK_RATE_HZ + 999999) / 1000000) : 1;
+    /* An overrun yields instead of queuing catch-up samples or starving other tasks. */
+    ulTaskNotifyTake(pdTRUE, ticks ? ticks : 1);
+}
+
 void sensor_coordinator_checkpoint(uint32_t sensor)
 {
-    if (!sync_events || (sensor != SENSOR_COORDINATOR_UWB &&
+    if (!sync_events || !state_mutex || (sensor != SENSOR_COORDINATOR_UWB &&
                          sensor != SENSOR_COORDINATOR_IMU &&
                          sensor != SENSOR_COORDINATOR_BATTERY))
         return;
 
     EventBits_t request = request_bit(sensor);
     EventBits_t ack = acknowledgement_bit(sensor);
-    if (!(xEventGroupGetBits(sync_events) & request)) return;
-
-    ESP_LOGI(TAG, "%s acquisition stopped at a safe boundary; stack high-water=%u",
-             sensor_name(sensor),
-             (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    xEventGroupSetBits(sync_events, ack);
-    while (xEventGroupGetBits(sync_events) & request)
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    xEventGroupClearBits(sync_events, ack);
+    bool reported = false;
+    for (;;) {
+        if (xSemaphoreTake(state_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            ulTaskNotifyTake(pdTRUE, 1);
+            continue;
+        }
+        if (!(xEventGroupGetBits(sync_events) & request)) {
+            xEventGroupClearBits(sync_events, ack);
+            xSemaphoreGive(state_mutex);
+            return;
+        }
+        /* ACK stays valid until this task leaves the parked state under the mutex. */
+        xEventGroupSetBits(sync_events, ack);
+        xSemaphoreGive(state_mutex);
+        if (!reported) {
+            ESP_LOGI(TAG, "%s paused; stack high-water=%u", sensor_name(sensor),
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            reported = true;
+        }
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
+    }
 }
 
 esp_err_t sensor_coordinator_pause_for_ble(uint32_t timeout_ms)
@@ -122,8 +156,6 @@ esp_err_t sensor_coordinator_pause_for_ble(uint32_t timeout_ms)
         return ESP_ERR_INVALID_STATE;
     }
 
-    state = SENSOR_COORDINATOR_BLE_REQUESTED;
-    ESP_LOGI(TAG, "BLE session requested");
     state = SENSOR_COORDINATOR_PAUSING_SENSORS;
     EventBits_t requests = 0;
     EventBits_t acknowledgements = 0;
@@ -140,9 +172,9 @@ esp_err_t sensor_coordinator_pause_for_ble(uint32_t timeout_ms)
         acknowledgements |= ACK_BATTERY;
     }
     TaskHandle_t tasks[3] = {sensor_tasks[0], sensor_tasks[1], sensor_tasks[2]};
-    xEventGroupClearBits(sync_events, SENSOR_ACKS);
     xEventGroupSetBits(sync_events, requests);
     xSemaphoreGive(state_mutex);
+    ESP_LOGI(TAG, "BLE session requested; waiting for sensor acknowledgements");
     wake_registered_sensors(tasks);
 
     if (acknowledgements) {
@@ -151,17 +183,15 @@ esp_err_t sensor_coordinator_pause_for_ble(uint32_t timeout_ms)
         EventBits_t reached = xEventGroupWaitBits(sync_events, acknowledgements,
                                                   pdFALSE, pdTRUE, timeout);
         if ((reached & acknowledgements) != acknowledgements) {
-            TaskHandle_t tasks[3];
+            TaskHandle_t recovery_tasks[3];
             xSemaphoreTake(state_mutex, portMAX_DELAY);
-            state = SENSOR_COORDINATOR_ERROR_RECOVERY;
-            xEventGroupClearBits(sync_events, requests);
-            tasks[0] = sensor_tasks[0];
-            tasks[1] = sensor_tasks[1];
-            tasks[2] = sensor_tasks[2];
-            state = SENSOR_COORDINATOR_RESUMING_SENSORS;
-            wake_registered_sensors(tasks);
+            xEventGroupClearBits(sync_events, PAUSE_UWB | PAUSE_IMU | PAUSE_BATTERY);
+            recovery_tasks[0] = sensor_tasks[0];
+            recovery_tasks[1] = sensor_tasks[1];
+            recovery_tasks[2] = sensor_tasks[2];
             state = SENSOR_COORDINATOR_NORMAL_OPERATION;
             xSemaphoreGive(state_mutex);
+            wake_registered_sensors(recovery_tasks);
             ESP_LOGE(TAG, "sensor pause acknowledgement timed out; BLE was not started");
             return ESP_ERR_TIMEOUT;
         }
@@ -184,16 +214,12 @@ void sensor_coordinator_resume_after_ble(sensor_coordinator_state_t reason)
         return;
     }
 
-    state = reason;
-    ESP_LOGI(TAG, "BLE session ended; reason=%d", (int)reason);
-    state = SENSOR_COORDINATOR_RESUMING_SENSORS;
     xEventGroupClearBits(sync_events, PAUSE_UWB | PAUSE_IMU | PAUSE_BATTERY);
     TaskHandle_t tasks[3] = {sensor_tasks[0], sensor_tasks[1], sensor_tasks[2]};
-    wake_registered_sensors(tasks);
-    xEventGroupClearBits(sync_events, SENSOR_ACKS);
     state = SENSOR_COORDINATOR_NORMAL_OPERATION;
     xSemaphoreGive(state_mutex);
-    ESP_LOGI(TAG, "normal sensor operation restored");
+    wake_registered_sensors(tasks);
+    ESP_LOGI(TAG, "BLE session ended; reason=%d; sensor tasks released", (int)reason);
 }
 
 bool sensor_coordinator_ble_active(void)

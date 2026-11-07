@@ -31,6 +31,8 @@
 static const char *TAG = "UWB";
 static wifi_info_t network;
 static volatile bool wifi_connected = false;
+static volatile bool monitoring_requested = true;
+static portMUX_TYPE sensor_control_lock = portMUX_INITIALIZER_UNLOCKED;
 #define BATTERY_LOG_INTERVAL_MS 5000
 #define RANGE_FILTER_COUNT 8
 typedef struct {
@@ -100,11 +102,14 @@ static void apply_dashboard_control(bool streaming, uint32_t sensing_interval_ms
                                     uint32_t send_interval_ms,
                                     uint16_t antenna_delay, const char *role)
 {
-    /* Pause only UWB/IMU acquisition; Wi-Fi and the HTTP control server stay up. */
+    /* Sensor chips sleep; Wi-Fi/HTTPS remain available for the Play command. */
+    portENTER_CRITICAL(&sensor_control_lock);
+    monitoring_requested = streaming;
     uwb_ranging_set_paused(!streaming || !wifi_connected);
 #ifdef CONFIG_UWB_MPU6050_ENABLE
     imu_streaming = streaming && wifi_connected;
 #endif
+    portEXIT_CRITICAL(&sensor_control_lock);
     uwb_ranging_set_period(sensing_interval_ms);
     uwb_ranging_set_antenna_delay(antenna_delay);
     if (antenna_delay != active_antenna_delay) {
@@ -119,6 +124,7 @@ static void apply_dashboard_control(bool streaming, uint32_t sensing_interval_ms
         uwb_ranging_set_role(active_role);
         ESP_LOGW(TAG, "UWB role switched to %s", role_name(active_role));
     }
+    sensor_coordinator_notify(SENSOR_COORDINATOR_UWB | SENSOR_COORDINATOR_IMU);
     ESP_LOGI(TAG, "sensors %s (Wi-Fi active) sensing=%" PRIu32 " ms network=%" PRIu32
              " ms antenna_delay=%u role=%s",
              streaming ? "resumed" : "paused", sensing_interval_ms,
@@ -159,17 +165,7 @@ static esp_err_t init_imu(void)
         ESP_LOGE(TAG, "MPU6050 not found at 0x68 or 0x69: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "Keep MPU6050 still in any orientation: calibrating gyro");
-    err = mpu6050_calibrate(imu, 300, 5);
-    if (err != ESP_OK) {
-        mpu6050_delete(imu);
-        imu = NULL;
-        i2c_del_master_bus(imu_bus);
-        imu_bus = NULL;
-        ESP_LOGE(TAG, "MPU6050 calibration failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    ESP_LOGI(TAG, "MPU6050 ready at 0x%02x on SDA=%d SCL=%d", address,
+    ESP_LOGI(TAG, "MPU6050 detected at 0x%02x on SDA=%d SCL=%d", address,
              CONFIG_UWB_MPU6050_SDA_GPIO, CONFIG_UWB_MPU6050_SCL_GPIO);
     return ESP_OK;
 }
@@ -179,6 +175,8 @@ static void imu_sampling_task(void *argument)
     (void)argument;
     sensor_coordinator_register(SENSOR_COORDINATOR_IMU);
     uint32_t retry_ms = 1000;
+    bool sleeping = false;
+    bool calibrated = false;
     for (;;) {
         sensor_coordinator_checkpoint(SENSOR_COORDINATOR_IMU);
         if (!imu) {
@@ -191,13 +189,52 @@ static void imu_sampling_task(void *argument)
                 if (retry_ms > 30000) retry_ms = 30000;
                 continue;
             }
-            retry_ms = 1000;
+            sleeping = calibrated = false;
         }
         if (!imu_streaming) {
-            vTaskDelay(pdMS_TO_TICKS(20));
+            if (imu && !sleeping) {
+                esp_err_t err = mpu6050_set_sleep(imu, true);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "MPU6050 sleep failed: %s; retrying", esp_err_to_name(err));
+                    sensor_delay_with_checkpoint(SENSOR_COORDINATOR_IMU, 100);
+                    continue;
+                }
+                sleeping = true;
+                telemetry_update_imu(false, NULL, NULL, 0);
+            }
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
             continue;
         }
+        if (sleeping) {
+            esp_err_t err = mpu6050_set_sleep(imu, false);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "MPU6050 wake failed: %s; retrying", esp_err_to_name(err));
+                sensor_delay_with_checkpoint(SENSOR_COORDINATOR_IMU, 100);
+                continue;
+            }
+            sleeping = false;
+        }
+        if (!calibrated) {
+            ESP_LOGI(TAG, "Keep MPU6050 still in any orientation: calibrating gyro");
+            esp_err_t err = mpu6050_calibrate(imu, 300, 5);
+            if (err != ESP_OK) {
+                telemetry_update_imu(false, NULL, NULL, 0);
+                ESP_LOGW(TAG, "MPU6050 calibration failed: %s; reinitializing", esp_err_to_name(err));
+                mpu6050_delete(imu);
+                imu = NULL;
+                i2c_del_master_bus(imu_bus);
+                imu_bus = NULL;
+                sensor_delay_with_checkpoint(SENSOR_COORDINATOR_IMU, retry_ms);
+                if (retry_ms < 30000) retry_ms *= 2;
+                if (retry_ms > 30000) retry_ms = 30000;
+                continue;
+            }
+            calibrated = true;
+            ESP_LOGI(TAG, "MPU6050 ready; gyro calibration retained across sleep");
+        }
+        if (!imu_streaming) continue;
 
+        int64_t cycle_started_us = esp_timer_get_time();
         mpu6050_data_t data;
         esp_err_t err = mpu6050_read(imu, &data);
         if (err == ESP_OK) {
@@ -218,7 +255,7 @@ static void imu_sampling_task(void *argument)
             continue;
         }
         retry_ms = 1000;
-        vTaskDelay(pdMS_TO_TICKS(CONFIG_UWB_TAG_PERIOD_MS));
+        sensor_coordinator_wait_period(uwb_ranging_get_period(), cycle_started_us);
     }
 }
 #endif
@@ -372,24 +409,43 @@ static void on_range(const uwb_ranging_peer_t *peer)
 static void on_wifi_connection_changed(bool connected, void *arg)
 {
     (void)arg;
+    portENTER_CRITICAL(&sensor_control_lock);
     wifi_connected = connected;
-    uwb_ranging_set_paused(!connected);
+    uwb_ranging_set_paused(!connected || !monitoring_requested);
 #ifdef CONFIG_UWB_MPU6050_ENABLE
-    imu_streaming = connected;
+    imu_streaming = connected && monitoring_requested;
 #endif
+    portEXIT_CRITICAL(&sensor_control_lock);
+    sensor_coordinator_notify(SENSOR_COORDINATOR_UWB | SENSOR_COORDINATOR_IMU);
     ESP_LOGI(TAG, "Wi-Fi %s; sensor acquisition %s",
              connected ? "connected" : "disconnected",
-             connected ? "resumed" : "paused");
+             connected && monitoring_requested ? "resumed" : "paused");
 }
 
 static void sensing_task(void *argument)
 {
     (void)argument;
+    ESP_ERROR_CHECK(sensor_coordinator_register(SENSOR_COORDINATOR_UWB));
+    sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
+    ESP_LOGI(TAG, "startup: initializing sensors");
 #ifdef CONFIG_UWB_MPU6050_ENABLE
+    esp_err_t imu_err = init_imu();
+    if (imu_err != ESP_OK)
+        ESP_LOGW(TAG, "IMU unavailable at startup; its task will retry: %s", esp_err_to_name(imu_err));
+    sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
     if (xTaskCreatePinnedToCore(imu_sampling_task, "imu_sampler", 3072,
                                        NULL, 4, NULL,
                                        portNUM_PROCESSORS > 1 ? 1 : tskNO_AFFINITY) != pdPASS) {
         ESP_LOGE(TAG, "could not start IMU task; continuing with UWB only");
+        if (imu) {
+            mpu6050_set_sleep(imu, true);
+            mpu6050_delete(imu);
+            imu = NULL;
+        }
+        if (imu_bus) {
+            i2c_del_master_bus(imu_bus);
+            imu_bus = NULL;
+        }
     }
 #endif
 #ifdef CONFIG_UWB_BATTERY_MONITOR_ENABLE
@@ -401,6 +457,7 @@ static void sensing_task(void *argument)
                          2, NULL, portNUM_PROCESSORS > 1 ? 1 : tskNO_AFFINITY) != pdPASS)
         ESP_LOGE(TAG, "could not start battery logging task");
 #endif
+    sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
 
     uwb_ranging_config_t config = {
         .role = active_role,
@@ -415,10 +472,9 @@ static void sensing_task(void *argument)
         .on_waiting = NULL,
     };
     memcpy(config.device_id, network.mac, sizeof(network.mac));
-    sensor_coordinator_register(SENSOR_COORDINATOR_UWB);
-    ESP_LOGW(TAG, "sensing started on CPU%d as %s",
-             xPortGetCoreID(),
-             config.role == UWB_RANGING_ANCHOR ? "ANCHOR" : "TAG");
+    ESP_LOGI(TAG, "startup: starting %s ranging on CPU%d",
+             role_name(config.role),
+             xPortGetCoreID());
     uint32_t retry_ms = 1000;
     for (;;) {
         sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
@@ -520,9 +576,11 @@ static bool print_csv_sensor_row(const char *const fields[SERIAL_CSV_FIELD_COUNT
     size_t capacity = 1;
     for (unsigned i = 0; i < SERIAL_CSV_FIELD_COUNT; ++i) {
         const char *value = fields[i] && fields[i][0] ? fields[i] : "0";
-        size_t length = strlen(value), overhead = strlen(names[i]) + 3;
-        if (capacity > SIZE_MAX - overhead || length > (SIZE_MAX - capacity - overhead) / 2) return false;
-        capacity += length * 2 + overhead;
+        size_t length = strlen(value), escapes = 0, overhead = strlen(names[i]) + 3;
+        for (const char *at = value; *at; ++at) escapes += *at == '\r' || *at == '\n';
+        if (capacity > SIZE_MAX - overhead || length > SIZE_MAX - capacity - overhead ||
+            escapes > SIZE_MAX - capacity - overhead - length) return false;
+        capacity += length + escapes + overhead;
     }
     char *line = malloc(capacity);
     if (!line) return false;
@@ -548,7 +606,17 @@ static bool print_csv_sensor_row(const char *const fields[SERIAL_CSV_FIELD_COUNT
 static void csv_serial_task(void *argument)
 {
     (void)argument;
+    bool pause_reported = false;
     for (;;) {
+        if (!monitoring_requested) {
+            if (!pause_reported) {
+                ESP_LOGW(TAG, "Device is paused: UWB deep sleep, IMU sleep mode.\n");
+                pause_reported = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        pause_reported = false;
         telemetry_sample_t sample;
         char role[8];
         bool range_valid = telemetry_read_snapshot(&sample, role);
@@ -576,7 +644,7 @@ static void csv_serial_task(void *argument)
         serial_number(values[41], sample.battery_percent, sample.battery_valid, 1);
         serial_number(values[42], sample.battery_voltage, sample.battery_valid, 3);
         serial_number(values[43], sample.speed_mps, range_valid, 4);
-        if (!print_csv_sensor_row(fields)) ESP_LOGW(TAG, "Could not print CSV sensor row");
+        if (monitoring_requested && !print_csv_sensor_row(fields)) ESP_LOGW(TAG, "Could not print CSV sensor row");
         free(iq);
         // Raw CIR can exceed 16 KB; this is a rate-limited console snapshot, not a sample queue.
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -585,6 +653,7 @@ static void csv_serial_task(void *argument)
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "startup: connecting Wi-Fi; GPIO17 opens Bluetooth setup");
     ESP_ERROR_CHECK(sensor_coordinator_init());
     wifi_set_connection_callback(on_wifi_connection_changed, NULL);
     esp_err_t err = wifi_connect(&network);
@@ -593,6 +662,7 @@ void app_main(void)
         return;
     }
     bool clock_ready = false;
+    ESP_LOGI(TAG, "startup: synchronizing clock");
 #ifdef CONFIG_UWB_TIME_SOURCE_API
     clock_ready = time_sync_startup() == ESP_OK;
     if (!clock_ready) ESP_LOGW(TAG, "API and SNTP failed; requesting phone/computer clock fallback");
@@ -617,9 +687,15 @@ void app_main(void)
     };
     memcpy(telemetry_config.device_id, network.mac, sizeof(network.mac));
     err = telemetry_start(&telemetry_config);
-    if (err != ESP_OK)
-        ESP_LOGE(TAG, "Wi-Fi telemetry unavailable: %s", esp_err_to_name(err));
-    else if (xTaskCreatePinnedToCore(csv_serial_task, "csv_serial", 8192, NULL,
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "startup stopped: dashboard API unavailable: %s", esp_err_to_name(err));
+        return;
+    }
+    if (!clock_ready) ESP_LOGI(TAG, "waiting for phone/computer time; connect the app or dashboard");
+    while (!telemetry_wait_for_clock(1000)) {}
+    while (!wifi_connected || sensor_coordinator_ble_active()) vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_LOGI(TAG, "startup: clock synchronized");
+    if (xTaskCreatePinnedToCore(csv_serial_task, "csv_serial", 8192, NULL,
                                     1, NULL, portNUM_PROCESSORS > 1 ? 0 : tskNO_AFFINITY) != pdPASS)
         ESP_LOGW(TAG, "CSV-style serial output unavailable");
 

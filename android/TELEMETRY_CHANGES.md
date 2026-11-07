@@ -2,47 +2,28 @@
 
 ## Network inventory and migration
 
-There is no remote backend API in the Android app. All runtime API traffic is
-to configured/discovered ESP32 devices. XML namespace URLs, license links,
-Gradle repositories, and documentation links are not device API connections.
+There is no remote backend API. `/api/telemetry`, `/api/cir`, `/api/control`
+and `/api/time` all use HTTPS. Android blocks cleartext; Python clients also
+require HTTPS. Each board creates a unique self-signed identity in C on first
+boot and stores it persistently. No factory CA, factory tool, per-IP certificate
+or private key embedded in shared firmware is required.
 
-| Flow | Before | After / remaining work |
-| --- | --- | --- |
-| Android `GET /api/telemetry` | HTTP unless a certificate pin was configured | HTTPS when advertised by firmware, required in the device editor, or a pin is configured. Legacy HTTP-only firmware remains supported. |
-| Android `GET /api/cir` | Same HTTP/pin decision | Uses the same HTTPS policy and verification as telemetry. |
-| Android `POST /api/control` (role, streaming, intervals, antenna calibration) | Same HTTP/pin decision | Uses the same HTTPS policy; request payloads are sent after TLS/hostname verification. |
-| Python dashboard / localization / CIR API clients | Already HTTPS-only; certificate fingerprint checked, hostname/chain verification disabled | HTTPS retained. The public certificate is fetched without sending API data, checked against the configured pin, then trusted for a second verified connection. Hostname and certificate validity checks are enabled. |
-| UDP discovery, port 4210 | `UWB_DISCOVER`, MAC/IP/role reply | Same UDP protocol, plus optional `api_scheme`. Packet source IP remains authoritative; UDP does not establish certificate trust. |
-| Wi-Fi provisioning | BLE Security 1 | Unchanged; this is not an HTTP flow. |
+The chosen policy is trust on first use: initial pairing must happen on trusted
+private Wi-Fi and can be impersonated at that moment. Android validates the
+certificate's validity, self-signature and exact MAC-derived DNS name, then
+saves its public-key fingerprint in encrypted durable storage before API data
+is allowed. Later key changes are blocked until explicit Pair again confirmation.
+Concurrent first connections and storage errors fail closed. DHCP changes do
+not change identity. Redirects and failed-TLS fallback are not allowed. Legacy
+manual fingerprints preserve their existing validity/IP/DNS checks.
 
-Android remembers an HTTPS requirement once configured, advertised, or successfully
-used; expiry of a discovery reply or a handshake failure does not trigger an HTTP
-retry. A spoofed HTTPS advertisement can cause a connection failure, but cannot
-make an untrusted certificate acceptable. A pin is an explicit per-device trust
-anchor. The platform hostname verifier is retained; with no pin, system trust
-is used. Redirects are rejected, responses remain size-limited, and TLS has a
-five-second timeout to allow ESP32 handshakes. Errors appear on the selected
-device's dashboard as well as through control/CIR feedback. Unreadable encrypted
-TLS settings fail closed and can be re-entered in the device editor.
+The identity uses a separate partition; existing Wi-Fi/calibration and app
+partition offsets are preserved. UDP discovery and BLE provisioning retain their
+protocols; discovery alone does not authenticate first pairing. Time.Now remains
+HTTPS. API client authorization and physical key protection are separate from
+this transport migration. No real board or phone has been modified.
 
-The local `sdkconfig` inspected for this change has `CONFIG_UWB_TLS_ENABLE`
-disabled. `components/telemetry/certs/device_cert.pem` and `device_key.pem` are
-absent. `telemetry_start()` therefore starts the HTTP server, not the HTTPS
-server. All three routes on that build still need a unique device certificate
-and key, TLS enabled in menuconfig, and rebuilt/flashed firmware. No certificate,
-key, or firmware was installed on hardware during this task. The global Android
-cleartext permission remains necessary for existing dynamic-IP HTTP devices.
-
-See [TLS setup](../components/telemetry/TLS_SETUP.md) for certificate issuance.
-Previously issued CN-only certificates need an IP/DNS subjectAltName matching the
-connection address. Pins do not bypass this requirement. Reserve device IPs or
-reissue certificates when addresses change. HTTPS provides server authentication;
-the existing API still has no client authorization mechanism.
-
-Verification follows the platform APIs described in
-[Android network security](https://developer.android.com/privacy-and-security/security-ssl),
-[Python SSL](https://docs.python.org/3.11/library/ssl.html), and
-[ESP-IDF 6.0.1 HTTPS server](https://docs.espressif.com/projects/esp-idf/en/v6.0.1/esp32s3/api-reference/protocols/esp_https_server.html).
+See [TLS setup](../components/telemetry/TLS_SETUP.md) and [customer setup](../CUSTOMER_SETUP.md).
 
 ## What CSV records
 

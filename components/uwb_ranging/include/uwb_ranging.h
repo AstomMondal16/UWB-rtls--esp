@@ -35,11 +35,13 @@ typedef struct {
     uwb_ranging_waiting_callback_t on_waiting;
 } uwb_ranging_config_t;
 
-/* Initializes the DW1000 and runs the selected role until a fatal error. */
+/* Initializes the DW1000, allows 1 s settling, then runs the selected role. */
 esp_err_t uwb_ranging_run(const uwb_ranging_config_t *config);
 
 /* Runtime controls used by the LAN dashboard. */
 void uwb_ranging_set_paused(bool paused);
 esp_err_t uwb_ranging_set_role(uwb_ranging_role_t role);
 esp_err_t uwb_ranging_set_period(uint32_t period_ms);
+/* Shared UWB/IMU target period, including the startup default before ranging starts. */
+uint32_t uwb_ranging_get_period(void);
 esp_err_t uwb_ranging_set_antenna_delay(uint16_t antenna_delay);

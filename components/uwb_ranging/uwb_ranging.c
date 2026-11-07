@@ -9,6 +9,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
 #include "sensor_coordinator.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -147,12 +148,38 @@ static uwb_ranging_role_t current_role(void)
     return role;
 }
 
-static uint32_t current_period_ms(void)
+uint32_t uwb_ranging_get_period(void)
 {
     portENTER_CRITICAL(&runtime_lock);
     uint32_t period_ms = runtime_period_ms;
     portEXIT_CRITICAL(&runtime_lock);
-    return period_ms;
+    return period_ms ? period_ms : CONFIG_UWB_TAG_PERIOD_MS;
+}
+
+static esp_err_t sleep_until_resumed(ranging_context_t *ctx)
+{
+    ESP_RETURN_ON_ERROR(dw1000_enter_deep_sleep(), TAG, "DW1000 deep sleep");
+    if (ctx->config.on_inactive_device) {
+        if (ctx->config.role == UWB_RANGING_TAG) {
+            for (unsigned i = 0; i < ctx->anchor_count; ++i)
+                ctx->config.on_inactive_device(&ctx->anchors[i].peer);
+        } else if (ctx->has_peer) ctx->config.on_inactive_device(&ctx->peer);
+    }
+    for (;;) {
+        sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
+        if (!is_paused()) break;
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+    }
+    // Wake/reinitialize only in the SPI owner, after BLE has released its pause.
+    portENTER_CRITICAL(&runtime_lock);
+    uint16_t delay = runtime_antenna_delay;
+    portEXIT_CRITICAL(&runtime_lock);
+    uint16_t address = ((uint16_t)ctx->short_address[0] << 8) | ctx->short_address[1];
+    ESP_RETURN_ON_ERROR(dw1000_init(ctx->eui, ctx->config.pan_id, address, delay), TAG, "DW1000 wake");
+    portENTER_CRITICAL(&runtime_lock);
+    if (runtime_antenna_delay == delay) antenna_delay_pending = false;
+    portEXIT_CRITICAL(&runtime_lock);
+    return ESP_OK;
 }
 
 static bool valid_frame_length(size_t length)
@@ -408,12 +435,9 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
 
     for (;;) {
         sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
+        if (is_paused()) return sleep_until_resumed(ctx);
         if (role_changed(ctx)) return ESP_OK;
         apply_antenna_delay();
-        if (is_paused()) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
         vTaskDelay(1); /* Let CPU0's idle task feed the task watchdog. */
         heartbeat(ctx);
         forget_inactive_peer(ctx);
@@ -742,12 +766,10 @@ static esp_err_t run_tag(ranging_context_t *ctx)
     uint8_t frame[FRAME_LEN];
     for (;;) {
         sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
+        if (is_paused()) return sleep_until_resumed(ctx);
         if (role_changed(ctx)) return ESP_OK;
+        int64_t cycle_started_us = esp_timer_get_time();
         apply_antenna_delay();
-        if (is_paused()) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
         heartbeat(ctx);
         forget_inactive_anchors(ctx);
         if (!ctx->anchor_count ||
@@ -759,7 +781,7 @@ static esp_err_t run_tag(ranging_context_t *ctx)
             if (range_once(ctx, frame) == ESP_OK)
                 save_tag_anchor(ctx, index);
         }
-        vTaskDelay(pdMS_TO_TICKS(current_period_ms()));
+        sensor_coordinator_wait_period(uwb_ranging_get_period(), cycle_started_us);
     }
 }
 
@@ -792,6 +814,12 @@ esp_err_t uwb_ranging_run(const uwb_ranging_config_t *config)
     if (runtime_antenna_delay == initial_antenna_delay)
         antenna_delay_pending = false;
     portEXIT_CRITICAL(&runtime_lock);
+    ESP_LOGI(TAG, "sensors initialized; settling for 1000 ms before ranging");
+    for (unsigned elapsed_ms = 0; elapsed_ms < 1000; elapsed_ms += 50) {
+        sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
     for (;;) {
         ctx.config.role = current_role();
         ctx.has_peer = false;

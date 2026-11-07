@@ -1,0 +1,5 @@
+set(identity_sources)
+if(CONFIG_UWB_TLS_ENABLE)
+    list(APPEND identity_sources "device_identity.c")
+endif()
+idf_component_register(SRCS ${identity_sources} INCLUDE_DIRS "include" REQUIRES nvs_flash mbedtls esp_hw_support)

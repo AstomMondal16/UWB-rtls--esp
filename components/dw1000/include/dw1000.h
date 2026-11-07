@@ -17,6 +17,8 @@
 esp_err_t dw1000_init(const uint8_t eui[8], uint16_t pan_id, uint16_t short_address,
                       uint16_t antenna_delay);
 esp_err_t dw1000_deinit(void);
+/* Sensing-task owner only. Wake by calling dw1000_init() to restore all radio settings. */
+esp_err_t dw1000_enter_deep_sleep(void);
 esp_err_t dw1000_set_antenna_delay(uint16_t antenna_delay);
 uint32_t dw1000_device_id(void);
 

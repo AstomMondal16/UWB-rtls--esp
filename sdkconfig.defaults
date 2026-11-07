@@ -8,10 +8,14 @@ CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y
 CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
 CONFIG_FREERTOS_TIMER_TASK_AFFINITY_CPU0=y
 
-# The BLE-enabled firmware needs the larger single-app partition.
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# BLE-enabled firmware and persistent HTTPS identity use the custom partition table.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # Time API mode verifies TLS certificate dates and runs HTTPS during startup.
 CONFIG_MBEDTLS_HAVE_TIME_DATE=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_UWB_TIME_SOURCE_PHONE=y
+
+# Local API: HTTPS only; each board creates its own persistent identity.
+CONFIG_UWB_TLS_ENABLE=y

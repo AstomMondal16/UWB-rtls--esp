@@ -24,10 +24,10 @@ internal val LightDashboardColorScheme = lightColorScheme(
     errorContainer = Color(0xFFFFDAD6), onErrorContainer = Color(0xFF7D1010),
     background = AppBackground, onBackground = AppText,
     surface = AppSurface, onSurface = AppText,
-    surfaceVariant = Color(0xFFE2E6F0), onSurfaceVariant = AppMuted,
+    surfaceVariant = Color(0xFFE9EDF3), onSurfaceVariant = AppMuted,
     outline = Color(0xFF727987), outlineVariant = Color(0xFFC3C9D6),
-    surfaceContainer = Color(0xFFEDF0F8), surfaceContainerHigh = Color(0xFFE6EAF3),
-    surfaceContainerHighest = Color(0xFFDEE3EE), surfaceContainerLow = Color(0xFFF2F4FB)
+    surfaceContainer = Color(0xFFEDF0F5), surfaceContainerHigh = Color(0xFFE6EAF0),
+    surfaceContainerHighest = Color(0xFFDEE4EC), surfaceContainerLow = Color(0xFFF1F4F8)
 )
 internal val DarkDashboardColorScheme = darkColorScheme(
     primary = Color(0xFFB2C5FF), onPrimary = Color(0xFF122D61),
@@ -56,7 +56,7 @@ fun MyApplicationTheme(darkTheme: Boolean = false, deviceColors: Boolean = false
         colorScheme = scheme,
         typography = Typography,
         shapes = Shapes(extraSmall = RoundedCornerShape(8.dp), small = RoundedCornerShape(12.dp),
-            medium = RoundedCornerShape(20.dp), large = RoundedCornerShape(24.dp), extraLarge = RoundedCornerShape(28.dp)),
+            medium = RoundedCornerShape(16.dp), large = RoundedCornerShape(20.dp), extraLarge = RoundedCornerShape(24.dp)),
         content = content
     )
 }

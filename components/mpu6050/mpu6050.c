@@ -17,6 +17,7 @@ struct mpu6050_t {
     float accel_scale;
     float gyro_scale;
     float gyro_offset[3];
+    bool sleeping;
 };
 
 static esp_err_t write_register(mpu6050_handle_t handle, uint8_t reg,
@@ -82,9 +83,26 @@ esp_err_t mpu6050_create(i2c_master_bus_handle_t bus, uint8_t address,
     return ESP_OK;
 }
 
+esp_err_t mpu6050_set_sleep(mpu6050_handle_t handle, bool sleeping)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+    if (handle->sleeping == sleeping) return ESP_OK;
+    uint8_t reg = REG_PWR_MGMT_1, power = 0;
+    esp_err_t err = i2c_master_transmit_receive(handle->device, &reg, 1, &power, 1,
+                                               I2C_TRANSACTION_TIMEOUT_MS);
+    if (err != ESP_OK) return err;
+    power = sleeping ? (power | 0x40) : (power & (uint8_t)~0x40);
+    err = write_register(handle, REG_PWR_MGMT_1, power);
+    if (err != ESP_OK) return err;
+    handle->sleeping = sleeping;
+    if (!sleeping) vTaskDelay(pdMS_TO_TICKS(100));
+    return ESP_OK;
+}
+
 esp_err_t mpu6050_read(mpu6050_handle_t handle, mpu6050_data_t *data)
 {
     if (!handle || !data) return ESP_ERR_INVALID_ARG;
+    if (handle->sleeping) return ESP_ERR_INVALID_STATE;
 
     uint8_t reg = REG_ACCEL_XOUT_H;
     uint8_t raw[14];

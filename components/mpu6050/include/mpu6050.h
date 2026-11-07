@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 
@@ -51,6 +52,8 @@ esp_err_t mpu6050_create(i2c_master_bus_handle_t bus, uint8_t address,
                          const mpu6050_config_t *config,
                          mpu6050_handle_t *out_handle);
 esp_err_t mpu6050_read(mpu6050_handle_t handle, mpu6050_data_t *data);
+/* Sensor-task owner only; preserves range/filter settings and gyro calibration. */
+esp_err_t mpu6050_set_sleep(mpu6050_handle_t handle, bool sleeping);
 esp_err_t mpu6050_calibrate(mpu6050_handle_t handle, uint16_t samples,
                             uint32_t delay_ms);
 void mpu6050_delete(mpu6050_handle_t handle);

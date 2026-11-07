@@ -16,11 +16,13 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
 #include "dw1000.h"
+#include "device_identity.h"
 
 #define DISCOVERY_PORT 4210
 #define TELEMETRY_MAX_PEERS 8
@@ -67,13 +69,9 @@ static char device_mac[18];
 static char device_ip[16];
 static bool clock_synchronized;
 static bool use_phone_clock;
+static SemaphoreHandle_t clock_ready_signal;
 static telemetry_control_callback_t control_callback;
-#ifdef CONFIG_UWB_TLS_ENABLE
-extern const uint8_t device_cert_pem_start[] asm("_binary_device_cert_pem_start");
-extern const uint8_t device_cert_pem_end[] asm("_binary_device_cert_pem_end");
-extern const uint8_t device_key_pem_start[] asm("_binary_device_key_pem_start");
-extern const uint8_t device_key_pem_end[] asm("_binary_device_key_pem_end");
-#endif
+
 
 static BaseType_t network_core(void)
 {
@@ -189,6 +187,14 @@ int64_t telemetry_clock_unix_ms(void)
     return (int64_t)now.tv_sec * 1000 + now.tv_usec / 1000;
 }
 
+bool telemetry_wait_for_clock(uint32_t timeout_ms)
+{
+    if (telemetry_clock_unix_ms() > 0) return true;
+    if (!clock_ready_signal) return false;
+    xSemaphoreTake(clock_ready_signal, pdMS_TO_TICKS(timeout_ms));
+    return telemetry_clock_unix_ms() > 0;
+}
+
 /* A single bounded decimal UTC epoch value; no extra keys or trailing content. */
 static bool parse_clock_update(const char *body, int64_t *epoch_ms)
 {
@@ -236,6 +242,7 @@ static esp_err_t clock_handler(httpd_req_t *request)
     portENTER_CRITICAL(&state_lock);
     clock_synchronized = true;
     portEXIT_CRITICAL(&state_lock);
+    xSemaphoreGive(clock_ready_signal);
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_sendstr(request, "{\"ok\":true}");
@@ -632,10 +639,10 @@ static void discovery_task(void *argument)
 esp_err_t telemetry_start(const telemetry_config_t *config)
 {
     if (!config || !config->ip_address || !config->role ||
-        config->buffer_length < 2 || config->sensing_interval_ms < 20 ||
+        config->buffer_length < 2 || config->buffer_length > 256 || config->sensing_interval_ms < 20 ||
         config->send_interval_ms < 50)
         return ESP_ERR_INVALID_ARG;
-    if (samples || collector_task_handle || api_server)
+    if (samples || collector_task_handle || api_server || clock_ready_signal)
         return ESP_ERR_INVALID_STATE;
     snprintf(device_mac, sizeof(device_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
              config->device_id[0], config->device_id[1], config->device_id[2],
@@ -653,30 +660,41 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
     control_callback = config->on_control;
     clock_synchronized = config->clock_synchronized;
     use_phone_clock = !config->clock_synchronized;
+    clock_ready_signal = xSemaphoreCreateBinary();
+    if (!clock_ready_signal) return ESP_ERR_NO_MEM;
+    esp_err_t err = ESP_ERR_NO_MEM;
     samples = xQueueCreate(config->buffer_length, sizeof(telemetry_sample_t));
-    if (!samples) return ESP_ERR_NO_MEM;
+    if (!samples) goto fail;
 
     if (xTaskCreatePinnedToCore(collector_task, "telemetry_buffer", 4096, NULL,
                                 4, &collector_task_handle, network_core()) != pdPASS) {
         collector_task_handle = NULL;
-        vQueueDelete(samples);
-        samples = NULL;
-        return ESP_ERR_NO_MEM;
+        goto fail;
     }
 
-    esp_err_t err;
+    ESP_LOGI(TAG, "sample queue: %u slots, %u bytes", (unsigned)config->buffer_length,
+             (unsigned)(config->buffer_length * sizeof(telemetry_sample_t)));
 #ifdef CONFIG_UWB_TLS_ENABLE
     httpd_ssl_config_t https_config = HTTPD_SSL_CONFIG_DEFAULT();
     https_config.httpd.core_id = network_core();
     https_config.httpd.stack_size = 12288;
     https_config.httpd.lru_purge_enable = true;
     https_config.httpd.max_uri_handlers = 4;
-    https_config.servercert = device_cert_pem_start;
-    https_config.servercert_len = device_cert_pem_end - device_cert_pem_start;
-    https_config.prvtkey_pem = device_key_pem_start;
-    https_config.prvtkey_len = device_key_pem_end - device_key_pem_start;
+    device_identity_t identity;
+    err = device_identity_load(device_mac, &identity);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTPS identity unavailable: %s; check identity storage (existing keys are never replaced automatically)", esp_err_to_name(err));
+        goto fail;
+    }
+    https_config.servercert = (const uint8_t *)identity.certificate;
+    https_config.servercert_len = strlen(identity.certificate) + 1;
+    https_config.prvtkey_pem = (const uint8_t *)identity.private_key;
+    https_config.prvtkey_len = strlen(identity.private_key) + 1;
+    https_config.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
     https_config.port_secure = 443;
+    esp_log_level_set("esp_https_server", ESP_LOG_WARN);
     err = httpd_ssl_start(&api_server, &https_config);
+    device_identity_free(&identity);
 #else
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
     http_config.core_id = network_core();
@@ -745,6 +763,10 @@ fail:
     if (samples) {
         vQueueDelete(samples);
         samples = NULL;
+    }
+    if (clock_ready_signal) {
+        vSemaphoreDelete(clock_ready_signal);
+        clock_ready_signal = NULL;
     }
     return err;
 }

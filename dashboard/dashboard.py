@@ -16,30 +16,31 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
+from functools import lru_cache
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, NamedTemporaryFile
 from tkinter import filedialog
 from urllib.error import URLError
 from urllib.parse import urlsplit
-from http.client import HTTPSConnection
+from http.client import HTTPSConnection, HTTPConnection
 
-BG = "#e1e8ec"
-PANEL = "#f4f6f7"
-PANEL_2 = "#d7e1e6"
-GRID = "#b8c9d2"
-GRID_MAJOR = "#8da9ba"
-TEXT = "#102a3a"
-MUTED = "#4c6c80"
-CYAN = "#007f9f"
-GREEN = "#087a4a"
-AMBER = "#a55b00"
-RED = "#c3344f"
-ENTRY_BG = "#f8fafb"
-SELECT_BG = "#cfeef5"
-BORDER = "#829eae"
-POPUP_BG = "#f8fafb"
-DEVICE_FACES = ("#c6e6ed", "#9fd2de", "#b5dce5",
-                "#82bfd0", "#94c9d6", "#d1eaf0")
+BG = "#f5f7fa"
+PANEL = "#ffffff"
+PANEL_2 = "#edf0f5"
+GRID = "#e1e6ed"
+GRID_MAJOR = "#c3ccd8"
+TEXT = "#111827"
+MUTED = "#4b5565"
+CYAN = "#2857a8"
+GREEN = "#286941"
+AMBER = "#955600"
+RED = "#ba1a1a"
+ENTRY_BG = "#ffffff"
+SELECT_BG = "#dce5ff"
+BORDER = "#d8dee7"
+POPUP_BG = PANEL
+DEVICE_FACES = ("#dbe4f1", "#c4d3e8", "#d1ddeb",
+                "#b7c9e1", "#c2d1e6", "#e3eaf3")
 DISCOVERY_PORT = 4210
 DW1000_TIME_UNIT_S = 1 / (499_200_000 * 128)
 DW1000_AIR_SPEED_MPS = 299_702_547
@@ -48,6 +49,8 @@ DEVICE_HISTORY_FILE = Path.home() / ".spatial_node_devices.json"
 LOGO_FILE = Path(__file__).resolve().parent / "assets" / "sense-logo.png"
 MAX_TELEMETRY_BYTES = 32 * 1024
 MAX_CONTROL_BYTES = 8 * 1024
+TRUSTED_CERTIFICATES_PATH = Path.home() / ".uwb_trusted_certificates.json"
+_device_trust_lock = threading.Lock()
 
 
 def read_json_response(response, max_bytes):
@@ -63,48 +66,154 @@ def sync_system_clock(host, device_id, data):
                  body={"unix_ms": time.time_ns() // 1_000_000})
 
 
+class DeviceHTTPSConnection(HTTPSConnection):
+    """Connect to a discovered IP while verifying the board's stable DNS identity."""
+    def __init__(self, ip, port, context, tls_name, fingerprint, verify_device_name=True):
+        super().__init__(ip, port, timeout=5.0, context=context)
+        self.device_context = context
+        self.tls_name = tls_name
+        self.fingerprint = fingerprint
+        self.verify_device_name = verify_device_name
+
+    def connect(self):
+        HTTPConnection.connect(self)
+        try:
+            self.sock = self.device_context.wrap_socket(self.sock, server_hostname=self.tls_name)
+            names = self.sock.getpeercert().get("subjectAltName", ())
+            if self.verify_device_name and not any(kind == "DNS" and name.lower() == self.tls_name.lower() for kind, name in names):
+                raise ssl.CertificateError("Certificate does not identify this device")
+            actual = hashlib.sha256(self.sock.getpeercert(binary_form=True)).hexdigest()
+            if not hmac.compare_digest(actual, self.fingerprint):
+                raise ssl.SSLError("Device TLS certificate changed during handshake")
+        except Exception:
+            self.close()
+            raise
+
+
+def _read_device_trust():
+    if not TRUSTED_CERTIFICATES_PATH.exists():
+        return {}
+    value = json.loads(TRUSTED_CERTIFICATES_PATH.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or any(not isinstance(pin, str) or len(pin) != 64 or
+            any(c not in "0123456789abcdefABCDEF" for c in pin) for pin in value.values()):
+        raise ValueError("Saved device trust is invalid; repair it explicitly before pairing")
+    return value
+
+
+def _remember_device_certificate(identity, candidate):
+    with _device_trust_lock:
+        trusted = _read_device_trust()
+        saved = trusted.get(identity)
+        if saved and not hmac.compare_digest(saved.lower(), candidate.lower()):
+            raise ssl.SSLError("Device identity changed; pair again explicitly on trusted Wi-Fi")
+        if saved:
+            return
+        trusted[identity] = candidate
+        temporary = None
+        try:
+            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=TRUSTED_CERTIFICATES_PATH.parent,
+                                    prefix="uwb-trust-", suffix=".tmp", delete=False) as output:
+                temporary = Path(output.name)
+                json.dump(trusted, output)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, TRUSTED_CERTIFICATES_PATH)
+        finally:
+            if temporary and temporary.exists():
+                temporary.unlink()
+
+
+class _ApiSession:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.connection = None
+        self.fingerprint = ""
+        self.manual = False
+
+    def close(self):
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
+    def __del__(self):
+        self.close()
+
+
+@lru_cache(maxsize=32)
+def _cached_api_session(identity, host, port, trust_file):
+    # Active callers retain their session when its idle cache entry is evicted.
+    return _ApiSession()
+
+
+def close_device_api_connections():
+    _cached_api_session.cache_clear()
+
+
 def api_json(address, device_id, method="GET", body=None, max_bytes=MAX_TELEMETRY_BYTES):
-    try:
-        credentials = json.loads(os.environ["UWB_DEVICE_CREDENTIALS"])
-        identity = normalize_mac(device_id) or str(device_id).strip().lower()
-        secret = credentials[identity]
-        fingerprint = secret["tls_fingerprint"].replace(":", "").replace(" ", "")
-        expected = bytes.fromhex(fingerprint)
-    except (KeyError, ValueError, TypeError) as error:
-        raise ValueError("Set UWB_DEVICE_CREDENTIALS JSON for each device MAC/IP") from error
-    if len(expected) != 32 or len(fingerprint) != 64:
-        raise ValueError("Device TLS fingerprint must be 64 hexadecimal characters")
     parsed = urlsplit(address)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("The device API requires HTTPS")
-    # Fetch only the public certificate, then pin it before sending any API data.
-    pem = ssl.get_server_certificate((parsed.hostname, parsed.port or 443), timeout=5.0)
-    actual = hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).digest()
-    if not hmac.compare_digest(actual, expected):
-        raise ssl.SSLError("Device TLS certificate fingerprint mismatch")
-    context = ssl.create_default_context(cadata=pem)
-    if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
-        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
-    connection = HTTPSConnection(parsed.hostname, parsed.port or 443,
-                                 timeout=5.0, context=context)
-    try:
-        headers = {"Cache-Control": "no-cache"}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        connection.request(method, parsed.path or "/", body=body, headers=headers)
-        certificate = connection.sock.getpeercert(binary_form=True) if connection.sock else b""
-        actual = hashlib.sha256(certificate).digest()
-        if not hmac.compare_digest(actual, expected):
-            raise ssl.SSLError("Device TLS certificate fingerprint mismatch")
-        response = connection.getresponse()
-        payload = response.read(max_bytes + 1)
-        if len(payload) > max_bytes:
-            raise ValueError(f"HTTP response exceeds {max_bytes} bytes")
-        if response.status != 200:
-            raise OSError(f"Device HTTP status {response.status}: {response.reason}")
-        return json.loads(payload.decode("utf-8"))
-    finally:
-        connection.close()
+    identity = normalize_mac(device_id)
+    credentials = json.loads(os.environ.get("UWB_DEVICE_CREDENTIALS", "{}"))
+    if not isinstance(credentials, dict):
+        raise ValueError("Device credentials must be a JSON object")
+    secret = credentials.get(identity or str(device_id).strip().lower(), {})
+    if not isinstance(secret, dict) or not isinstance(secret.get("tls_fingerprint", ""), str):
+        raise ValueError("Device TLS settings must contain a string fingerprint")
+    fingerprint = secret.get("tls_fingerprint", "").replace(":", "").replace(" ", "")
+    if fingerprint and (len(fingerprint) != 64 or any(c not in "0123456789abcdefABCDEF" for c in fingerprint)):
+        raise ValueError("Device TLS fingerprint must be 64 hexadecimal characters")
+    if not fingerprint and not identity:
+        raise ValueError("Scan network to identify the device MAC before connecting securely")
+    session = _cached_api_session(identity or str(device_id).strip().lower(), parsed.hostname,
+                                  parsed.port or 443, str(TRUSTED_CERTIFICATES_PATH))
+    with session.lock:
+        if fingerprint:
+            saved = fingerprint.lower()
+        else:
+            with _device_trust_lock:
+                saved = _read_device_trust().get(identity, "").lower()
+        if session.connection is not None and (session.manual != bool(fingerprint) or session.fingerprint != saved):
+            session.close()
+        try:
+            if session.connection is None:
+                # Certificate-only probe is needed once, not before every telemetry request.
+                pem = ssl.get_server_certificate((parsed.hostname, parsed.port or 443), timeout=5.0)
+                candidate = hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest()
+                if saved and not hmac.compare_digest(saved, candidate):
+                    raise ssl.SSLError("Device identity changed; pair again explicitly on trusted Wi-Fi")
+                context = ssl.create_default_context(cadata=pem)
+                if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+                    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+                session.connection = DeviceHTTPSConnection(parsed.hostname, parsed.port or 443, context,
+                    parsed.hostname if fingerprint else "uwb-" + identity.replace(":", "").lower() + ".local",
+                    candidate, verify_device_name=not bool(fingerprint))
+                session.fingerprint = candidate
+                session.manual = bool(fingerprint)
+            connection = session.connection
+            if connection.sock is None:
+                connection.connect()
+            if not fingerprint:
+                _remember_device_certificate(identity, session.fingerprint)
+            headers = {"Cache-Control": "no-cache"}
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+                if isinstance(body, dict):
+                    body = json.dumps(body).encode("utf-8")
+            connection.request(method, parsed.path or "/", body=body, headers=headers)
+            response = connection.getresponse()
+            try:
+                payload = response.read(max_bytes + 1)
+                if len(payload) > max_bytes:
+                    raise ValueError(f"HTTP response exceeds {max_bytes} bytes")
+                if response.status != 200:
+                    raise OSError(f"Device HTTP status {response.status}: {response.reason}")
+                return json.loads(payload.decode("utf-8"))
+            finally:
+                response.close()
+        except Exception:
+            session.close()
+            raise
 
 
 def normalize_mac(value):
@@ -450,7 +559,7 @@ class Dashboard:
         self.root.configure(bg=BG)
         top = tk.Frame(self.root, bg=PANEL, padx=16, pady=12,
                        highlightbackground=BORDER, highlightthickness=1)
-        top.pack(fill="x", padx=18, pady=(14, 5))
+        top.pack(fill="x", padx=16, pady=(16, 8))
         brand = tk.Frame(top, bg=PANEL)
         brand.pack(side="left")
         try:
@@ -468,15 +577,16 @@ class Dashboard:
         tk.Label(brand, text="© Made by astommondal013@gmail.com", bg=PANEL,
                  fg=MUTED, font=("Segoe UI", 8)).pack(anchor="center", pady=(2, 0))
 
-        controls = tk.Frame(top, bg=PANEL)
-        controls.pack(side="right")
+        controls = tk.Frame(self.root, bg=PANEL, padx=16, pady=12,
+                            highlightbackground=BORDER, highlightthickness=1)
+        controls.pack(fill="x", padx=16, pady=(0, 8))
         tk.Label(controls, text="MAC / IP", bg=PANEL, fg=TEXT,
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 7))
         self.search_box = tk.Frame(controls, bg=ENTRY_BG,
                                    highlightbackground=BORDER,
-                                   highlightcolor=CYAN, highlightthickness=2)
+                                   highlightcolor=CYAN, highlightthickness=1)
         self.search_box.pack(side="left", padx=(0, 8))
-        entry = tk.Entry(self.search_box, textvariable=self.target, width=40,
+        entry = tk.Entry(self.search_box, textvariable=self.target, width=28,
                          bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
                          selectbackground=SELECT_BG, relief="flat",
                          highlightthickness=0, font=("Consolas", 11))
@@ -501,21 +611,21 @@ class Dashboard:
         self.history_list.bind("<Return>", self.choose_device_history)
         self.history_list.bind("<Escape>", self.hide_device_history)
         self.history_list.bind("<FocusOut>", self.schedule_history_hide)
-        self.connect_button = self.button(controls, "CONNECT", self.toggle_connection, CYAN)
+        self.connect_button = self.button(controls, "Connect", self.toggle_connection, CYAN)
         self.connect_button.configure(width=11)
         self.connect_button.pack(side="left", padx=6)
         self.pause_button = self.button(
-            controls, "PAUSE SENSORS", self.toggle_stream, AMBER)
+            controls, "Pause sensors", self.toggle_stream, AMBER)
         self.pause_button.configure(width=14)
         self.pause_button.pack(side="left", padx=6)
         self.zero_button = self.button(
-            controls, "ZERO", self.zero_orientation, GREEN)
+            controls, "Zero", self.zero_orientation, GREEN)
         self.zero_button.configure(width=11)
         self.zero_button.pack(side="left", padx=6)
-        save_button = self.button(controls, "SAVE", self.save_data, CYAN)
+        save_button = self.button(controls, "Save", self.save_data, CYAN)
         save_button.configure(width=8)
         save_button.pack(side="left", padx=6)
-        refresh_button = self.button(controls, "REFRESH", self.restart, CYAN)
+        refresh_button = self.button(controls, "Refresh", self.restart, CYAN)
         refresh_button.configure(width=9)
         refresh_button.pack(side="left")
 
@@ -538,21 +648,21 @@ class Dashboard:
         settings.pack(fill="x", padx=18, pady=(5, 0))
         timing = tk.Frame(settings, bg=PANEL)
         timing.pack(side="left")
-        tk.Label(timing, text="SENSING ms", bg=PANEL, fg=MUTED,
+        tk.Label(timing, text="Sensing (ms)", bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         tk.Entry(timing, textvariable=self.sensing_interval, width=7,
                  bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat",
                  highlightbackground=BORDER, highlightcolor=CYAN,
                  highlightthickness=1, justify="center",
                  font=("Consolas", 10)).pack(side="left", padx=(7, 18), ipady=6)
-        tk.Label(timing, text="NETWORK ms", bg=PANEL, fg=MUTED,
+        tk.Label(timing, text="Network (ms)", bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         tk.Entry(timing, textvariable=self.send_interval, width=7,
                  bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat",
                  highlightbackground=BORDER, highlightcolor=CYAN,
                  highlightthickness=1, justify="center",
                  font=("Consolas", 10)).pack(side="left", padx=(7, 18), ipady=6)
-        tk.Label(timing, text="ROLE", bg=PANEL, fg=MUTED,
+        tk.Label(timing, text="Role", bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         role_menu = tk.OptionMenu(timing, self.role, "TAG", "ANCHOR")
         role_menu.configure(bg=PANEL_2, fg=TEXT, activebackground=SELECT_BG,
@@ -564,11 +674,11 @@ class Dashboard:
                                     activeforeground=TEXT,
                                     font=("Consolas", 10))
         role_menu.pack(side="left", padx=(7, 9), ipady=2)
-        self.button(timing, "APPLY", self.apply_intervals, GREEN).pack(side="left")
+        self.button(timing, "Apply", self.apply_intervals, GREEN).pack(side="left")
 
         calibration = tk.Frame(settings, bg=PANEL)
         calibration.pack(side="right")
-        tk.Label(calibration, text="KNOWN DISTANCE m", bg=PANEL, fg=MUTED,
+        tk.Label(calibration, text="Known distance (m)", bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         tk.Entry(calibration, textvariable=self.known_distance, width=8,
                  bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat",
@@ -577,7 +687,7 @@ class Dashboard:
                  font=("Consolas", 10)).pack(
                      side="left", padx=(7, 9), ipady=6)
         self.calibrate_button = self.button(
-            calibration, "CALIBRATE UWB", self.calibrate_uwb, AMBER)
+            calibration, "Calibrate UWB", self.calibrate_uwb, AMBER)
         self.calibrate_button.pack(side="left")
         tk.Label(calibration, text="Antenna delay DTU", bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9)).pack(side="left", padx=(18, 5))
@@ -604,7 +714,7 @@ class Dashboard:
         self.device.bind("<MouseWheel>", self.zoom_device)
         self.device.bind("<Button-4>", self.zoom_device)
         self.device.bind("<Button-5>", self.zoom_device)
-        self.grid_button = self.button(self.device, "GRID OFF", self.toggle_grid, GREEN)
+        self.grid_button = self.button(self.device, "Hide grid", self.toggle_grid, GREEN)
         self.grid_button.place(relx=1, x=-14, y=14, anchor="ne")
 
         cards = tk.Frame(right, bg=BG)
@@ -638,7 +748,7 @@ class Dashboard:
                          activebackground=SELECT_BG, activeforeground=TEXT,
                          highlightbackground=BORDER, highlightthickness=1,
                          borderwidth=0, relief="flat", cursor="hand2",
-                         padx=14, pady=9, font=("Segoe UI", 9, "bold"))
+                         padx=16, pady=8, font=("Segoe UI", 10))
 
     def show_device_history(self, event=None, show_all=False):
         if event and event.keysym in ("Down", "Up", "Return", "Escape"):
@@ -742,11 +852,11 @@ class Dashboard:
         running = (self.worker_thread and self.worker_thread.is_alive() and
                    not self.stop_event.is_set())
         if self.connected:
-            action = ("DISCONNECT" if not target or
+            action = ("Disconnect" if not target or
                       self.target_is_active(target) else "SWITCH")
             self.connect_button.configure(text=action)
         elif not running:
-            self.connect_button.configure(text="CONNECT")
+            self.connect_button.configure(text="Connect")
 
     def target_is_active(self, target):
         wanted_mac = normalize_mac(target)
@@ -775,7 +885,7 @@ class Dashboard:
         self.orientation_reference_pending = True
         self.status.set("DISCOVERING" if not self.demo else "DEMO STREAM")
         self.status_dot.configure(fg=AMBER)
-        self.connect_button.configure(text="CANCEL")
+        self.connect_button.configure(text="Cancel")
         self.pause_button.configure(state="normal")
         self.zero_button.configure(text="ZERO", state="normal")
         self.worker_thread = threading.Thread(target=self.worker,
@@ -784,13 +894,14 @@ class Dashboard:
 
     def disconnect(self):
         self.stop_event.set()
+        close_device_api_connections()
         self.host = ""
         self.active_target = ""
         self.connected = False
         self.calibration_target = None
         self.calibration_samples.clear()
-        self.calibrate_button.configure(text="CALIBRATE UWB")
-        self.connect_button.configure(text="CONNECT")
+        self.calibrate_button.configure(text="Calibrate UWB")
+        self.connect_button.configure(text="Connect")
         self.pause_button.configure(state="normal")
         self.zero_button.configure(text="ZERO", state="normal")
         self.status.set("DISCONNECTED")
@@ -866,7 +977,10 @@ class Dashboard:
                 self.events.get_nowait()
             except queue.Empty:
                 pass
-            self.events.put_nowait((kind, payload, source))
+            try:
+                self.events.put_nowait((kind, payload, source))
+            except queue.Full:
+                pass
 
     def process_events(self):
         try:
@@ -890,14 +1004,14 @@ class Dashboard:
                     if role in ("TAG", "ANCHOR"):
                         self.role.set(role)
                     self.pause_button.configure(
-                        text=("PAUSE SENSORS" if self.streaming else
-                              "RESUME SENSORS"), state="normal")
+                        text=("Pause sensors" if self.streaming else
+                              "Resume sensors"), state="normal")
                 elif kind == "connection_error":
                     self.connected = False
                     self.host = ""
                     self.active_target = ""
                     self.device_identity = ""
-                    self.connect_button.configure(text="CONNECT")
+                    self.connect_button.configure(text="Connect")
                     self.status.set("OFFLINE  •  " + payload)
                     self.status_dot.configure(fg=RED)
                 elif kind == "error":
@@ -912,7 +1026,7 @@ class Dashboard:
         self.latest = sample
         self.remember_device(sample)
         self.connected = True
-        self.connect_button.configure(text="DISCONNECT")
+        self.connect_button.configure(text="Disconnect")
         if not sample.get("streaming", True):
             self.status.set(
                 f"SENSORS PAUSED  •  WIFI ONLINE  •  age {sample.get('age_ms', 0)} ms")
@@ -925,7 +1039,7 @@ class Dashboard:
         self.identity.set(f"MAC {sample.get('mac', '—')}  •  IP {sample.get('ip', '—')}  •  PEER {sample.get('peer', '—')}")
         self.streaming = sample.get("streaming", True)
         self.pause_button.configure(
-            text="PAUSE SENSORS" if self.streaming else "RESUME SENSORS")
+            text="Pause sensors" if self.streaming else "Resume sensors")
         if not self.settings_loaded:
             self.sensing_interval.set(sample.get("sensing_interval_ms", 80))
             self.send_interval.set(sample.get("send_interval_ms", 50))
@@ -973,7 +1087,7 @@ class Dashboard:
                     self.post("error", str(error))
                 self.calibration_target = None
                 self.calibration_samples.clear()
-                self.calibrate_button.configure(text="CALIBRATE UWB")
+                self.calibrate_button.configure(text="Calibrate UWB")
         self.distance_history.append(distance)
         self.speed_history.append(speed)
         self.distance.set(f"{distance:.3f}")
@@ -1081,7 +1195,7 @@ class Dashboard:
         if self.demo:
             self.streaming = not self.streaming
             self.pause_button.configure(
-                text="PAUSE SENSORS" if self.streaming else "RESUME SENSORS")
+                text="Pause sensors" if self.streaming else "Resume sensors")
             self.status.set("DEMO STREAM" if self.streaming else
                             "SENSORS PAUSED  •  DASHBOARD ONLINE")
             return
@@ -1123,7 +1237,7 @@ class Dashboard:
         if self.calibration_target is not None:
             self.calibration_target = None
             self.calibration_samples.clear()
-            self.calibrate_button.configure(text="CALIBRATE UWB")
+            self.calibrate_button.configure(text="Calibrate UWB")
             self.status.set("UWB CALIBRATION CANCELLED")
             return
         if not self.connected or self.demo:
@@ -1138,12 +1252,12 @@ class Dashboard:
             return
         self.calibration_target = target
         self.calibration_samples.clear()
-        self.calibrate_button.configure(text="CANCEL CAL")
+        self.calibrate_button.configure(text="Cancel calibration")
         self.status.set(f"CALIBRATING UWB  •  0/{CALIBRATION_SAMPLES}  •  KEEP STILL")
 
     def toggle_grid(self):
         self.grid_enabled = not self.grid_enabled
-        self.grid_button.configure(text="GRID OFF" if self.grid_enabled else "GRID ON")
+        self.grid_button.configure(text="Hide grid" if self.grid_enabled else "Show grid")
         self.draw_device()
 
     def zoom_device(self, event):
@@ -1223,9 +1337,9 @@ class Dashboard:
         if hasattr(self, "loading_logo"):
             canvas.create_image(center_x, y1 + 62, image=self.loading_logo)
         else:
-            canvas.create_text(center_x, y1 + 62, text="SPATIAL NODE",
+            canvas.create_text(center_x, y1 + 62, text="Spatial Node",
                                fill=TEXT, font=("Segoe UI", 18, "bold"))
-        canvas.create_text(center_x, y1 + 112, text="REFRESHING WORKSPACE",
+        canvas.create_text(center_x, y1 + 112, text="Refreshing workspace",
                            fill=TEXT, font=("Segoe UI", 17, "bold"))
         canvas.create_text(center_x, y1 + 139,
                            text="Your live session will continue automatically",
@@ -1283,6 +1397,7 @@ class Dashboard:
 
     def close(self):
         self.stop_event.set()
+        close_device_api_connections()
         self.root.destroy()
 
 

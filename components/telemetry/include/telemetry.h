@@ -39,7 +39,7 @@ typedef struct {
     bool clock_synchronized;
 } telemetry_config_t;
 
-/* Starts the CPU0 queue consumer, HTTP API, and UDP MAC discovery service. */
+/* Starts the CPU0 queue consumer, dashboard API, and UDP MAC discovery service. */
 esp_err_t telemetry_start(const telemetry_config_t *config);
 
 /* Never blocks sensing. The oldest queued sample is discarded if full. */
@@ -58,6 +58,9 @@ bool telemetry_read_snapshot(telemetry_sample_t *sample, char role[8]);
 
 /* UTC system-clock milliseconds, or 0 until the selected source synchronizes. */
 int64_t telemetry_clock_unix_ms(void);
+
+/* Startup task waits without holding a mutex; the time endpoint signals readiness. */
+bool telemetry_wait_for_clock(uint32_t timeout_ms);
 
 /* Complete raw CIR JSON, or NULL on failure. Optional capture_valid reports valid I/Q. Caller frees(). */
 char *telemetry_copy_cir_json(bool *capture_valid);

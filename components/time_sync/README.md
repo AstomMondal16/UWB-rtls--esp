@@ -4,8 +4,8 @@ Run `idf.py menuconfig`, then open **UWB ranging → Timestamp clock source**.
 
 | Choice | Startup and clock behavior |
 | --- | --- |
-| Phone / computer clock (default) | Start normally after Wi-Fi. The Android app or desktop dashboard reads `clock_source:"phone"` with `device_time_unix_ms:0` and posts its current UTC epoch milliseconds to `POST /api/time`. No Internet connection on the ESP is needed. The terminal uses uptime until this request succeeds. |
-| Time.Now HTTPS API, then SNTP | Before telemetry and sensing start, try the requested Asia/Kolkata endpoint five times, with five seconds between failures. After five failures, try `pool.ntp.org` for up to ten seconds. Continue afterward; if neither source succeeded, request phone/computer time over the local network. Uptime is shown only until that transfer succeeds. |
+| Phone / computer clock (default) | After Wi-Fi, start the local API and wait. The Android app or either desktop dashboard reads `clock_source:"phone"` with `device_time_unix_ms:0` and posts its current UTC epoch milliseconds to `POST /api/time`. That update gives the startup semaphore; only then are sensors initialized. No Internet connection on the ESP is needed. |
+| Time.Now HTTPS API, then SNTP | Try the requested Asia/Kolkata endpoint five times, with five seconds between failures. After five failures, try `pool.ntp.org` for up to ten seconds. If neither succeeds, start the local API and wait for phone/computer time before initializing sensors. |
 
 The setting is compiled into firmware; switching it requires rebuilding and
 flashing. It is independent of the existing local-device HTTP/HTTPS setting.
@@ -29,8 +29,12 @@ Terminal and exported CSV timestamps use `DD-MM-YYYY HH:MM:SS` in IST (UTC+05:30
 - Original phone receipt time is always preserved as `received_at_utc` in the
   private JSONL capture. The 44 CSV columns, I/Q precision, device scope and
   recording pause behavior are unchanged.
-- Until a source synchronizes, `device_time_unix_ms` is zero and the terminal
-  explicitly displays `uptime_ms=...`; the rough TLS bootstrap date is hidden.
+- Until a source synchronizes, `device_time_unix_ms` is zero, sensors wait and
+  terminal sample rows do not start. The rough TLS bootstrap date is hidden.
+
+The startup waiter never holds a state mutex while waiting for time or network
+availability. The API remains reachable so a client can release it; see
+[startup and task coordination](../../STARTUP_FLOW.md).
 
 `configured_clock_source` reports the menuconfig choice. `clock_source` reports the effective source (`phone` or `api`); failed API/SNTP startup advertises `phone` so clients can recover the clock locally. In API mode,
 startup logs distinguish API success from SNTP fallback. No new wall clock is

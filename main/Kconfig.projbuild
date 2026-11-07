@@ -21,19 +21,23 @@ config UWB_WIFI_PASSWORD
 
 config UWB_BLE_SERVICE_NAME
     string "BLE provisioning device name"
-    default "UWB_E0D3C4"
+    default ""
     help
-        Exact BLE name advertised while Wi-Fi provisioning is active. Enter
-        any name up to 32 characters, for example UWB_01. Use a unique name.
+        Leave empty to derive a unique BLE name from each board's MAC address.
+        An optional custom name may contain up to 32 characters.
 
 config UWB_TLS_ENABLE
     bool "Use HTTPS for the dashboard API"
-    default n
+    depends on ESP_TLS_USING_MBEDTLS && MBEDTLS_TLS_SERVER
+    select ESP_HTTPS_SERVER_ENABLE
+    select MBEDTLS_X509_CREATE_C
+    select MBEDTLS_X509_CRT_WRITE_C
+    default y
     help
-        Use the unique self-signed device certificate and private key in
-        components/telemetry/certs/device_cert.pem and device_key.pem. Clients
-        must pin the certificate SHA-256 fingerprint. When disabled, the API
-        uses plain HTTP for trusted local networks such as a phone hotspot.
+        Each board creates a unique self-signed HTTPS identity in C on first
+        boot and keeps it in its identity NVS partition. Apps trust the first
+        key on a private network and reject unexpected subsequent changes.
+        No factory certificates are needed. Disabling this explicitly uses HTTP.
 
 choice UWB_TIME_SOURCE
     prompt "Timestamp clock source"
@@ -45,17 +49,17 @@ choice UWB_TIME_SOURCE
     config UWB_TIME_SOURCE_PHONE
         bool "Phone / computer clock (no Internet required on ESP)"
         help
-            Start immediately. The Android app or desktop dashboard sends its
-            clock on connection. CSV uses the app receipt timestamp. Until a
-            client connects, the terminal explicitly displays uptime.
+            Start the dashboard API, then wait for the Android app or desktop
+            dashboard to send its clock before initializing sensors. No Internet
+            connection is required. CSV uses the app receipt timestamp.
 
     config UWB_TIME_SOURCE_API
         bool "Time.Now HTTPS API, then SNTP fallback"
         help
             After Wi-Fi connects, try the Asia/Kolkata HTTPS time API five
             times, with five seconds between failed attempts. Then try SNTP
-            for up to ten seconds. Start sensing afterward; if both sources
-            fail, request the phone/computer clock over the local network.
+            for up to ten seconds. If both sources fail, wait for the phone or
+            computer clock over the local network before initializing sensors.
             CSV uses the synchronized device snapshot clock
             when available, otherwise the phone's receipt timestamp.
 endchoice

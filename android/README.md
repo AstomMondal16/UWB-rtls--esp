@@ -73,16 +73,27 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
    coordinates for anchors so the app can map tag positions.
 5. Select a device in **Device Selection** to view its IMU and CIR data.
 
-The app communicates with device HTTP endpoints such as `/api/telemetry`,
-`/api/cir`, and `/api/control` by default. To use a phone hotspot, leave the
-hotspot on, enter its exact network name and password in **Configure Wi-Fi via
-Bluetooth**, and provision each device. The phone and devices then share that
-local network; use **Scan network** to find the devices. HTTP and discovery
-need no internet connection. TLS-capable firmware advertises HTTPS; Android
-remembers that requirement without falling back after errors. For older TLS
-firmware, select Require HTTPS or enter its certificate fingerprint in the
-device editor. Self-signed certificates need a pin and matching IP/DNS SAN; see
-[`TLS_SETUP.md`](../components/telemetry/TLS_SETUP.md).
+A new board without Wi-Fi credentials opens Bluetooth setup automatically.
+Use **Wi-Fi setup** in Devices; press the board's setup button (GPIO17) when
+changing an existing network. After adding a board, the app sends its clock if
+the board is waiting for time. Sensor initialization and ranging then start.
+See [startup flow](../STARTUP_FLOW.md).
+
+In **Settings > Device configuration**, **Samples per second** sets the shared
+UWB/IMU target with one whole-number entry (1–20). Decimal and invalid values
+cannot be applied. The field explains actual UWB limits and tag-controlled
+ranging. See [sampling rate behavior](../SAMPLING_RATE.md).
+
+The app requires HTTPS for every device. Each board generates its own identity
+in C on first boot. Add it on trusted private Wi-Fi: the app remembers its public
+key automatically in encrypted storage and blocks later key changes. No factory
+tools, certificates, QR labels or PINs are needed. Initial trust is not authenticated:
+an attacker impersonating a board during first pairing could be trusted. Certificate
+validity, self-signature and exact MAC-based DNS identity are checked before pairing
+or sending API payloads. DHCP changes need no re-pairing. Use Edit > Pair again only
+after an expected identity reset. See [customer setup](../CUSTOMER_SETUP.md) and
+[TLS details](../components/telemetry/TLS_SETUP.md). Older HTTP-only firmware needs
+the updated firmware/partition table before this HTTPS-only app connects.
 Wi-Fi provisioning no longer asks for the 64-character API key. Its BLE
 Security 1 session encrypts traffic without a proof-of-possession check, so a
 nearby device can attempt provisioning while the device's service is open.
@@ -97,8 +108,10 @@ The dashboard API has no client API key; use it only on a trusted local network.
 - **CIR:** CIR capture must be enabled in the firmware of the device being
   viewed. A successful UWB exchange with another device is needed to produce
   new samples. The graph follows the strongest peak and centers its view on it.
-- **Start / Pause:** Starts or pauses data flow on configured devices that have
-  an IP address.
+- **Start / Pause:** Uses the existing device control endpoint. With the updated
+  firmware, Pause puts UWB/IMU chips to sleep and Start wakes them; Wi-Fi/HTTPS
+  remain active. The command applies to configured reachable devices. See
+  [sensor power behavior](../SENSOR_POWER.md).
 - **CSV:** Start recording from **Actions**. Recording appends to an app-private
   session file with a 512 MiB limit and retains prior records across stops.
   Choose **Export CSV** to save a streaming export. The export reports its row

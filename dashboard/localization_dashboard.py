@@ -20,23 +20,13 @@ from tempfile import TemporaryDirectory
 from tkinter import filedialog, messagebox, ttk
 from urllib.error import URLError
 
-from dashboard import (CALIBRATION_SAMPLES, MAX_CONTROL_BYTES,
+from dashboard import (AMBER, BG, BORDER, CYAN, GREEN, GRID, MUTED, PANEL,
+                       PANEL_2, RED, SELECT_BG, TEXT, CALIBRATION_SAMPLES, MAX_CONTROL_BYTES,
                        MAX_TELEMETRY_BYTES, Orientation, adjusted_zoom,
-                       api_json,
-                       calibrated_antenna_delay, normalize_mac)
+                       api_json, close_device_api_connections,
+                       calibrated_antenna_delay, normalize_mac, sync_system_clock)
 from cir_viewer import CIRWindow
 
-BG = "#e1e8ec"
-PANEL = "#f4f6f7"
-PANEL_2 = "#d7e1e6"
-TEXT = "#102a3a"
-MUTED = "#4c6c80"
-CYAN = "#007f9f"
-GREEN = "#087a4a"
-AMBER = "#a55b00"
-RED = "#c3344f"
-BORDER = "#829eae"
-GRID = "#c4d2d9"
 DISCOVERY_PORT = 4210
 FAST_SCAN_SECONDS = 2
 CONNECTED_SCAN_SECONDS = 10
@@ -226,8 +216,11 @@ def discover_devices(timeout=0.8):
 
 
 def fetch_telemetry(ip, device_id):
-    return api_json(f"https://{endpoint(ip)}/api/telemetry", device_id,
+    host = f"https://{endpoint(ip)}"
+    data = api_json(host + "/api/telemetry", device_id,
                     max_bytes=MAX_TELEMETRY_BYTES)
+    sync_system_clock(host, device_id, data)
+    return data
 
 
 class LocalizationDashboard:
@@ -297,15 +290,15 @@ class LocalizationDashboard:
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("Treeview", background=PANEL, fieldbackground=PANEL,
-                        foreground=TEXT, rowheight=27, bordercolor=BORDER)
+                        foreground=TEXT, rowheight=32, bordercolor=BORDER)
         style.configure("Treeview.Heading", background=PANEL_2, foreground=TEXT,
                         font=("Segoe UI", 9, "bold"))
-        style.map("Treeview", background=[("selected", "#cfeef5")],
+        style.map("Treeview", background=[("selected", SELECT_BG)],
                   foreground=[("selected", CYAN)])
 
-        top = tk.Frame(self.root, bg=PANEL, padx=18, pady=10,
+        top = tk.Frame(self.root, bg=PANEL, padx=16, pady=12,
                        highlightbackground=BORDER, highlightthickness=1)
-        top.pack(fill="x", padx=16, pady=(14, 7))
+        top.pack(fill="x", padx=16, pady=(16, 8))
         brand = tk.Frame(top, bg=PANEL)
         brand.pack(side="left")
         try:
@@ -319,27 +312,27 @@ class LocalizationDashboard:
         tk.Label(brand, text="© Made by astommondal013@gmail.com", bg=PANEL,
                  fg=MUTED, font=("Segoe UI", 8)).pack(anchor="center", pady=(2, 0))
 
-        self.brand_separator = tk.Frame(top, bg=CYAN, width=3, height=105)
-        self.brand_separator.pack(side="left", fill="y", padx=(20, 18), pady=5)
+        self.brand_separator = tk.Frame(top, bg=BORDER, width=1, height=80)
+        self.brand_separator.pack(side="left", fill="y", padx=20, pady=4)
         heading = tk.Frame(top, bg=PANEL)
         heading.pack(side="left", padx=(0, 28), fill="x", expand=True)
-        tk.Label(heading, text="UWB LOCALIZATION", bg=PANEL,
-                 fg=TEXT, font=("Segoe UI", 36, "bold")).pack(anchor="w")
+        tk.Label(heading, text="UWB localization", bg=PANEL,
+                 fg=TEXT, font=("Segoe UI", 24)).pack(anchor="w")
         tk.Label(heading, textvariable=self.summary, bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
         actions = tk.Frame(top, bg=PANEL)
         actions.pack(side="right")
         tk.Label(actions, textvariable=self.scan_status, bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9)).pack(anchor="e", pady=(0, 6))
-        self.pose_button = self.button(actions, "START TRACKING", self.toggle_device_streaming, GREEN)
+        self.pose_button = self.button(actions, "Start tracking", self.toggle_device_streaming, GREEN)
         self.pose_button.pack(side="left", padx=4)
-        self.button(actions, "↻  REFRESH SCAN", self.manual_scan, CYAN).pack(
+        self.button(actions, "Scan network", self.manual_scan, CYAN).pack(
             side="left", padx=4)
         self.collection_button = self.button(
-            actions, "SAVE CSV", self.toggle_collection, GREEN)
+            actions, "Record CSV", self.toggle_collection, GREEN)
         self.collection_button.configure(width=11)
         self.collection_button.pack(side="left", padx=4)
-        self.button(actions, "CLEAR ALL DEVICES", self.clear_all, RED).pack(
+        self.button(actions, "Clear all", self.clear_all, RED).pack(
             side="left", padx=4)
 
         workspace = tk.Frame(self.root, bg=PANEL, highlightbackground=BORDER,
@@ -355,7 +348,7 @@ class LocalizationDashboard:
 
         map_head = tk.Frame(map_panel, bg=PANEL_2, padx=14, pady=9)
         map_head.pack(fill="x")
-        tk.Label(map_head, text="LIVE 2D LOCALIZATION MAP", bg=PANEL_2, fg=TEXT,
+        tk.Label(map_head, text="Localization map", bg=PANEL_2, fg=TEXT,
                  font=("Segoe UI", 11, "bold")).pack(side="left")
         # tk.Label(map_head,
         #          text="Anchor coordinates define the map • Tag Z is its tracking-plane height • Fresh ranges expire after 3 s",
@@ -373,9 +366,9 @@ class LocalizationDashboard:
 
         imu_head = tk.Frame(map_panel, bg=PANEL_2, padx=14, pady=6)
         imu_head.pack(fill="x")
-        tk.Label(imu_head, text="LIVE IMU", bg=PANEL_2, fg=TEXT,
+        tk.Label(imu_head, text="Motion", bg=PANEL_2, fg=TEXT,
                  font=("Segoe UI", 10, "bold")).pack(side="left")
-        tk.Label(imu_head, text="DEVICE", bg=PANEL_2, fg=MUTED,
+        tk.Label(imu_head, text="Device", bg=PANEL_2, fg=MUTED,
                  font=("Segoe UI", 8, "bold")).pack(side="left", padx=(18, 6))
         self.imu_selector = ttk.Combobox(
             imu_head, textvariable=self.imu_device_name, state="readonly", width=7)
@@ -389,7 +382,7 @@ class LocalizationDashboard:
         self.imu_graph.pack(fill="x")
         self.imu_graph.bind("<Configure>", lambda _event: self.draw_imu_graph())
 
-        self.section(side, "CONFIGURED DEVICES")
+        self.section(side, "Saved devices")
         self.configured = ttk.Treeview(side, columns=("name", "role", "address", "xyz", "state"),
                                        show="headings", height=7)
         for column, title, width in (("name", "NAME", 52), ("role", "ROLE", 58),
@@ -403,16 +396,16 @@ class LocalizationDashboard:
         self.configured.bind("<Double-1>", lambda _event: self.edit_selected())
         configured_actions = tk.Frame(side, bg=PANEL)
         configured_actions.pack(fill="x", pady=(6, 0))
-        self.button(configured_actions, "+  ADD DEVICE", self.open_device_dialog,
+        self.button(configured_actions, "Add device", self.open_device_dialog,
                     GREEN).pack(side="left", fill="x", expand=True, padx=(0, 3))
-        self.button(configured_actions, "EDIT SELECTED", self.edit_selected,
+        self.button(configured_actions, "Edit", self.edit_selected,
                     CYAN).pack(side="left", fill="x", expand=True, padx=3)
-        self.button(configured_actions, "DELETE", self.remove_selected,
+        self.button(configured_actions, "Remove", self.remove_selected,
                     RED).pack(side="left", fill="x", expand=True, padx=(3, 0))
         self.calibration_button = self.button(
-            side, "CALIBRATE UWB FROM XYZ", self.calibrate_from_coordinates, AMBER)
+            side, "Calibrate from coordinates", self.calibrate_from_coordinates, AMBER)
         self.calibration_button.pack(fill="x", pady=(6, 0))
-        self.button(side, "VIEW CIR - IMU SELECTED DEVICE", self.open_cir, CYAN).pack(
+        self.button(side, "View CIR", self.open_cir, CYAN).pack(
             fill="x", pady=(6, 0))
 
         self.section(side, "CONTINUOUS NETWORK SCANNER")
@@ -424,7 +417,7 @@ class LocalizationDashboard:
             self.discovered_tree.column(column, width=width, anchor="center")
         self.discovered_tree.pack(fill="x")
         self.discovered_tree.bind("<Double-1>", lambda _event: self.use_discovered())
-        self.button(side, "ADD SELECTED DEVICE", self.use_discovered, AMBER).pack(
+        self.button(side, "Add selected", self.use_discovered, AMBER).pack(
             fill="x", pady=(6, 0))
 
         self.section(side, "LOCALIZATION STATUS")
@@ -444,9 +437,9 @@ class LocalizationDashboard:
     @staticmethod
     def button(parent, text, command, color):
         return tk.Button(parent, text=text, command=command, bg=PANEL_2, fg=color,
-                         activebackground="#cfeef5", activeforeground=TEXT,
+                         activebackground=SELECT_BG, activeforeground=TEXT,
                          relief="flat", borderwidth=0, cursor="hand2",
-                         padx=12, pady=8, font=("Segoe UI", 9, "bold"))
+                         padx=12, pady=8, font=("Segoe UI", 10))
 
     @staticmethod
     def field(parent, title, variable, row, column, width=10, span=1):
@@ -513,11 +506,11 @@ class LocalizationDashboard:
                  font=("Segoe UI", 8, "bold")).grid(row=0, column=3, sticky="w")
         role = tk.Menubutton(form, text=f"{self.role.get()}   ▼",
                              indicatoron=False, bg=PANEL_2, fg=TEXT,
-                             activebackground="#cfeef5", activeforeground=TEXT,
+                             activebackground=SELECT_BG, activeforeground=TEXT,
                              relief="flat", borderwidth=0, width=10,
                              font=("Segoe UI", 9))
         role_options = tk.Menu(role, tearoff=False, bg=PANEL, fg=TEXT,
-                               activebackground="#cfeef5", activeforeground=TEXT)
+                               activebackground=SELECT_BG, activeforeground=TEXT)
         def choose_role(value):
             self.role.set(value)
             role.configure(text=f"{value}   ▼")
@@ -531,9 +524,9 @@ class LocalizationDashboard:
         self.field(form, "YAW OFFSET (deg)", self.yaw, 2, 3)
         buttons = tk.Frame(form, bg=PANEL)
         buttons.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-        self.button(buttons, "APPLY", self.apply_role, GREEN).pack(
+        self.button(buttons, "Apply", self.apply_role, GREEN).pack(
             side="left", fill="x", expand=True, padx=(0, 4))
-        delete = self.button(buttons, "DELETE", self.remove_selected, RED)
+        delete = self.button(buttons, "Remove", self.remove_selected, RED)
         delete.configure(state="normal" if selected_key else "disabled")
         delete.pack(side="left", fill="x", expand=True, padx=(4, 0))
         dialog.bind("<Return>", lambda _event: self.apply_role())
@@ -587,7 +580,7 @@ class LocalizationDashboard:
             try:
                 self.events.get_nowait()
                 self.events.put_nowait((kind, payload))
-            except queue.Empty:
+            except (queue.Empty, queue.Full):
                 pass
 
     def process_events(self):
@@ -650,7 +643,7 @@ class LocalizationDashboard:
                       "error": ""})
         streaming = any(item.get("online") and item.get("sample", {}).get("streaming", True)
                         for item in self.states.values())
-        self.pose_button.configure(text="PAUSE TRACKING" if streaming else "START TRACKING",
+        self.pose_button.configure(text="Pause tracking" if streaming else "Start tracking",
                                    fg=RED if streaming else GREEN)
         source_role = str(sample.get("role", "")).lower()
         source_mac = mac or key
@@ -1020,7 +1013,7 @@ class LocalizationDashboard:
         if not targets:
             self.status.set("NO DEVICE IP AVAILABLE TO CONTROL TRACKING")
             return
-        self.pose_button.configure(text="PAUSE TRACKING" if streaming else "START TRACKING",
+        self.pose_button.configure(text="Pause tracking" if streaming else "Start tracking",
                                    fg=RED if streaming else GREEN)
         payload = json.dumps({"streaming": streaming}).encode()
         def send():
@@ -1040,7 +1033,7 @@ class LocalizationDashboard:
         if self.calibration_pairs:
             self.calibration_pairs.clear()
             self.calibration_seen.clear()
-            self.calibration_button.configure(text="CALIBRATE UWB FROM XYZ")
+            self.calibration_button.configure(text="Calibrate from coordinates")
             self.status.set("UWB CALIBRATION CANCELLED")
             return
         if self.demo:
@@ -1073,7 +1066,7 @@ class LocalizationDashboard:
             return
         self.calibration_pairs = targets
         self.calibration_seen.clear()
-        self.calibration_button.configure(text="CANCEL CALIBRATION")
+        self.calibration_button.configure(text="Cancel calibration")
         self.status.set(
             f"CALIBRATING {len(targets)} ANCHORS  •  0/{CALIBRATION_SAMPLES}  •  KEEP TAG STILL")
 
@@ -1091,7 +1084,7 @@ class LocalizationDashboard:
             updates = []
         self.calibration_pairs.clear()
         self.calibration_seen.clear()
-        self.calibration_button.configure(text="CALIBRATE UWB FROM XYZ")
+        self.calibration_button.configure(text="Calibrate from coordinates")
         if not updates:
             return
 
@@ -1126,7 +1119,7 @@ class LocalizationDashboard:
                 for identity in (record_key(device), device.get("mac"), device.get("ip"))
                 if identity}
             self.collecting = True
-            self.collection_button.configure(text="STOP   ⇩", fg=RED)
+            self.collection_button.configure(text="Stop and save", fg=RED)
             names = visual_device_names(self.devices, self.positions)
             selected_names = ",".join(
                 names[record_key(device)] for device in self.devices
@@ -1135,7 +1128,7 @@ class LocalizationDashboard:
             return
 
         self.collecting = False
-        self.collection_button.configure(text="SAVE CSV", fg=GREEN)
+        self.collection_button.configure(text="Record CSV", fg=GREEN)
         self.save_collection()
 
     def choose_collection_sources(self):
@@ -1148,7 +1141,7 @@ class LocalizationDashboard:
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
-        tk.Label(dialog, text="SELECT DEVICES", bg=BG, fg=TEXT,
+        tk.Label(dialog, text="Choose devices", bg=BG, fg=TEXT,
                  font=("Segoe UI", 13, "bold")).pack(
                      anchor="w", padx=18, pady=(16, 4))
         tk.Label(dialog, text="Tick the devices to record, then click OK.",
@@ -1186,7 +1179,7 @@ class LocalizationDashboard:
         actions.pack(fill="x", padx=18, pady=(0, 16))
         self.button(actions, "OK", accept, GREEN).pack(
             side="left", fill="x", expand=True, padx=(0, 4))
-        self.button(actions, "CANCEL", dialog.destroy, RED).pack(
+        self.button(actions, "Cancel", dialog.destroy, RED).pack(
             side="left", fill="x", expand=True, padx=(4, 0))
         dialog.bind("<Return>", lambda _event: accept())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -1268,7 +1261,7 @@ class LocalizationDashboard:
                        if record_key(item) == self.imu_selected_key), None)
         if not device:
             canvas.create_text(width / 2, height / 2,
-                               text="SELECT A DEVICE FROM THE LIVE IMU MENU",
+                               text="Choose a device to see its motion",
                                fill=MUTED, font=("Segoe UI", 11, "bold"))
             return
 
@@ -1359,7 +1352,7 @@ class LocalizationDashboard:
         points += [(item["x"], item["y"]) for item in self.positions.values()]
         if not points:
             canvas.create_text(width / 2, height / 2 - 15,
-                               text="ADD ANCHORS TO CREATE A LOCALIZATION REGION",
+                               text="Add anchors to create a localization map",
                                fill=TEXT, font=("Segoe UI", 15, "bold"))
             canvas.create_text(width / 2, height / 2 + 18,
                                text="Use manual MAC/IP entry or double-click a scanned device",
@@ -1496,6 +1489,7 @@ class LocalizationDashboard:
         self.scan_now.set()
         if self.cir_window and self.cir_window.winfo_exists():
             self.cir_window.close()
+        close_device_api_connections()
         self.root.destroy()
 
 

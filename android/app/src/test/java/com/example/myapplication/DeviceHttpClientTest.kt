@@ -80,23 +80,23 @@ class DeviceHttpClientTest {
         assertEquals("https", good.url.protocol)
         try { requireSuccessfulResponse(good); assertTrue(good.inputStream.bufferedReader().use { it.readText() }.contains("valid")) }
         finally { good.disconnect() }
-        for (route in listOf("cir", "control")) {
+        for (route in listOf("cir", "control", "time")) {
             val connection = openDeviceConnection(path.replace("telemetry", route), true, pin)
             try {
-                if (route == "control") {
+                if (route == "control" || route == "time") {
                     connection.requestMethod = "POST"; connection.doOutput = true
                     connection.outputStream.use { it.write("{\"streaming\":true}".toByteArray()) }
                 }
                 requireSuccessfulResponse(connection)
             } finally { connection.disconnect() }
         }
-        assertEquals(3, requests.get())
+        assertEquals(4, requests.get())
         for (wrongPin in listOf("00".repeat(32), "")) {
             val bad = openDeviceConnection(path, true, wrongPin)
             try { assertThrows(SSLException::class.java) { requireSuccessfulResponse(bad) } }
             finally { bad.disconnect() }
         }
-        assertEquals("Rejected TLS must not reach the API", 3, requests.get())
+        assertEquals("Rejected TLS must not reach the API", 4, requests.get())
     }
 
     @Test fun matchingPinDoesNotBypassHostnameVerification() = withTls("dns:other.invalid") { path, pin, requests ->
@@ -106,6 +106,12 @@ class DeviceHttpClientTest {
             connection.outputStream.use { it.write("sensitive control payload".toByteArray()) }
         } } finally { connection.disconnect() }
         assertEquals(0, requests.get())
+    }
+
+    @Test fun deviceIpSubjectAlternativeNameWorks() = withTls("ip:127.0.0.1") { path, pin, requests ->
+        val connection = openDeviceConnection(path.replace("localhost:", "127.0.0.1:"), true, pin)
+        try { requireSuccessfulResponse(connection) } finally { connection.disconnect() }
+        assertEquals(1, requests.get())
     }
 
     @Test fun expiredPinnedCertificateFails() = withTls(expired = true) { path, pin, requests ->

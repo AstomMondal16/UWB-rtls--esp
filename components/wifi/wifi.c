@@ -171,7 +171,7 @@ static void provisioning_event(ble_provisioning_event_t event, const void *data,
         } else {
             ESP_LOGI(TAG, "provisioned Wi-Fi connection succeeded");
             provisioning_transaction_pending = false;
-            ble_provisioning_request_stop();
+            /* Keep BLE available until the provisioning manager sends confirmation. */
         }
     } else if (event == BLE_PROVISIONING_CREDENTIALS_FAILED) {
         retry_saved_network = false;

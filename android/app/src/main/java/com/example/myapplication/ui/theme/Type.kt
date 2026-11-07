@@ -9,7 +9,7 @@ import androidx.compose.ui.unit.sp
 // Use the platform sans for familiar Android controls and tabular figures for live data.
 private fun instrumentType(size: Int, line: Int, weight: FontWeight = FontWeight.Normal) = TextStyle(
     fontFamily = FontFamily.SansSerif, fontWeight = weight, fontSize = size.sp,
-    lineHeight = line.sp, letterSpacing = 0.sp
+    lineHeight = line.sp, letterSpacing = 0.sp, fontFeatureSettings = "tnum"
 )
 val Typography = Typography(
     displaySmall = instrumentType(36, 44, FontWeight.Medium),
