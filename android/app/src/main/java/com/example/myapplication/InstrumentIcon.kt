@@ -20,6 +20,7 @@ internal fun InstrumentIcon(kind: String, tint: Color, modifier: Modifier = Modi
         "close" -> R.drawable.ic_close_24
         "record" -> R.drawable.ic_radio_button_checked_24
         "calibrate" -> R.drawable.ic_center_focus_strong_24
+        "history" -> R.drawable.ic_history_24
         "fit" -> R.drawable.ic_fit_screen_24
         "fullscreen" -> R.drawable.ic_fullscreen_24
         "check" -> R.drawable.ic_check_24

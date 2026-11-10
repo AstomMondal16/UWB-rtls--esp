@@ -168,6 +168,54 @@ Keystore AES/GCM. Android backup rules exclude their preference file and the
 local telemetry session file, so credentials must be entered again on a new
 phone.
 
+## Automatic one-month path history
+
+Open **Dashboard > Map > History** to view travelled paths. Recording, saving
+and expiry are automatic; there are no Record, Save or Delete controls. The
+current path can be viewed while data keeps arriving and updates every five
+seconds. Choose all tags or one tag, then pinch/drag to zoom/pan or **Fit path**.
+Outlined dots mark starts; solid markers mark the last observed positions.
+
+Every new valid solved 2D UWB position received by this app is saved, across all
+located tags, independently of selected device, visible tab and CSV recording.
+There is no one-second sampling reduction. Three anchors with measured
+coordinates are needed to solve positions. Duplicate range evidence is ignored;
+invalid positions, disconnects, Pause and missing measurement gaps break lines.
+This shows measured positions, not an interpolated or IMU-only route. Times are
+phone receipt times, displayed as `dd-MM-yyyy HH:mm:ss` in the phone's time zone.
+Keep the app open to receive telemetry; the cleanup job does not collect data.
+
+Files rotate automatically after 100,000 positions, 64 tags or a UTC day change;
+the position that starts the next file is retained. Each file keeps the anchor
+configuration used for its coordinates. Setup changes seal the current file;
+the next valid position starts another automatically. Closing normally seals
+the file; interrupted complete rows are recovered on the next app startup.
+The old 50-session/64-MiB cap is removed. Full-rate monthly history can use many
+GiB. A 256-MiB free-space reserve protects the phone: if storage is low, saving
+stops with a visible error and retries automatically after 30 seconds. Positions
+received during an I/O failure or retry window cannot be recovered. Newer
+history is not silently deleted to make room.
+
+A file expires **one calendar month after its last position**, calculated in
+UTC (e.g. January 31 expires February 28, or February 29 in a leap year). Cleanup
+runs on startup, hourly while the app is running and in a persisted daily
+Android JobScheduler job, including after a reboot without opening History.
+Android may defer background execution in Doze or after force-stop; cleanup
+catches up when the OS runs it or the app reopens. Therefore expiry is not an
+exact alarm. Unknown files and active writers are not removed. Interrupted or
+unreadable files expire based on their last filesystem modification time.
+
+Files remain app-private, excluded from cloud backup and device transfer;
+clearing app data or uninstalling removes them. Long previews show roughly
+5,000 positions plus per-tag endpoints and preserve gaps; the saved file keeps
+all accepted positions. No firmware protocol or CSV schema changes are needed.
+
+JobScheduler lifecycle and persistence follow the Android references:
+[JobInfo.Builder](https://developer.android.com/reference/android/app/job/JobInfo.Builder)
+and [JobService](https://developer.android.com/reference/android/app/job/JobService).
+Disk cleanup runs on a worker thread; the manifest grants RECEIVE_BOOT_COMPLETED
+for the persisted job and protects the service with BIND_JOB_SERVICE.
+
 ## Project files
 
 - `app/src/main/java/com/example/myapplication/MainActivity.kt` — Compose UI,

@@ -36,7 +36,10 @@ data class DashboardSnapshot(
     val streamingPending: Boolean = false,
     val recordingStartCount: Int = 0,
     val recordingStartedAtMs: Long? = null,
-    val trails: Map<String, List<TrailPoint>> = emptyMap()
+    val trails: Map<String, List<TrailPoint>> = emptyMap(),
+    val pathRecording: Boolean = false,
+    val pathPointCount: Int = 0,
+    val pathError: String = ""
 )
 
 fun normalizeMac(value: String): String = value.trim().replace("-", ":").uppercase()

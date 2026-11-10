@@ -2,6 +2,10 @@ package com.example.myapplication
 
 import android.Manifest
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.runtime.key
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material3.NavigationRail
@@ -560,6 +564,7 @@ private fun DashboardApp(
     }
     var fitMapRequest by remember { mutableStateOf(0) }
     var mapFullscreen by remember { mutableStateOf(false) }
+    var pathHistoryOpen by remember { mutableStateOf(false) }
     LaunchedEffect(configOpen) { if (configOpen) onScan() }
     val names = remember(snapshot.devices, snapshot.positions) {
         val result = mutableMapOf<String, String>()
@@ -801,6 +806,9 @@ private fun DashboardApp(
                                             when (section) {
                                                 0 -> GroupedSection("Localization map", headerAction = {
                                                     Row {
+                                                        IconButton(shape = MaterialTheme.shapes.medium, onClick = { pathHistoryOpen = true }, modifier = Modifier.semantics {
+                                                            contentDescription = "Open path history"
+                                                        }) { InstrumentIcon("history", Muted) }
                                                         IconButton(shape = MaterialTheme.shapes.medium, onClick = { fitMapRequest++ }, modifier = Modifier.semantics {
                                                             contentDescription = "Fit all anchors and tags"
                                                         }) { InstrumentIcon("fit", Muted) }
@@ -915,6 +923,9 @@ private fun DashboardApp(
             Column(Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Localization map", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    IconButton(shape = MaterialTheme.shapes.medium, onClick = { pathHistoryOpen = true }, modifier = Modifier.semantics {
+                        contentDescription = "Open path history"
+                    }) { InstrumentIcon("history", Muted) }
                     IconButton(shape = MaterialTheme.shapes.medium, onClick = { fitMapRequest++ }, modifier = Modifier.semantics {
                         contentDescription = "Fit all anchors and tags"
                     }) { InstrumentIcon("fit", Muted) }
@@ -932,6 +943,7 @@ private fun DashboardApp(
             }
         }
     }
+    if (pathHistoryOpen) PathHistoryDialog(repo, snapshot, onDismiss = { pathHistoryOpen = false })
     if (wifiProvisionOpen) WifiProvisioningDialog(onDismiss = { wifiProvisionOpen = false })
     if (calibrationConfirm) AlertDialog(onDismissRequest = { calibrationConfirm = false },
         title = { Text("Calibrate while tracking?") },
@@ -2109,6 +2121,129 @@ private fun WifiProvisioningDialog(onDismiss: () -> Unit) {
     }
 }
 
+
+private fun pathTime(timeMs: Long): String = java.time.Instant.ofEpochMilli(timeMs)
+    .atZone(java.time.ZoneId.systemDefault())
+    .format(DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm:ss", Locale.US))
+
+@Composable
+private fun PathHistoryDialog(repo: DeviceRepository, snapshot: DashboardSnapshot, onDismiss: () -> Unit) {
+    var sessions by remember { mutableStateOf<List<SavedPathSummary>>(emptyList()) }
+    var route by remember { mutableStateOf<SavedPath?>(null) }
+    var selectedTag by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var message by remember { mutableStateOf("") }
+    var alive by remember { mutableStateOf(true) }
+    var fit by remember { mutableStateOf(0) }
+    DisposableEffect(Unit) { onDispose { alive = false } }
+    fun refresh() {
+        repo.listPaths { result, error -> if (alive) {
+            loading = false
+            sessions = result.orEmpty()
+            if (error != null) message = error
+        } }
+    }
+    LaunchedEffect(Unit) {
+        while (alive) { refresh(); delay(10_000) }
+    }
+    LaunchedEffect(route?.summary?.id) {
+        val id = route?.summary?.id ?: return@LaunchedEffect
+        while (route?.summary?.active == true) {
+            delay(5_000)
+            repo.loadPath(id) { loaded, error -> if (alive && route?.summary?.id == id) {
+                if (error != null) { route = null; message = error; refresh() }
+                else route = loaded
+            } }
+        }
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.widthIn(max = 760.dp).fillMaxWidth(.96f).fillMaxHeight(.94f),
+            shape = MaterialTheme.shapes.extraLarge, color = Page) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Path history", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onDismiss) { Text("Done") }
+                }
+                if (route == null) {
+                    Text("Paths save automatically while this app receives tag positions. History expires after one month; no start or save action is needed.",
+                        color = Muted, style = MaterialTheme.typography.bodyMedium)
+                    Text(if (snapshot.pathRecording) "Auto-saving \u00b7 ${snapshot.pathPointCount} positions in the current section"
+                        else "Waiting for valid tag positions", color = Accent)
+                    Text("Every received valid position is kept. Keep the app open to receive data. Missing positions and Pause create gaps.",
+                        color = Muted, style = MaterialTheme.typography.bodySmall)
+                    if (snapshot.pathError.isNotBlank()) FeedbackMessage(snapshot.pathError)
+                    if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (message.isNotBlank()) FeedbackMessage(message)
+                    Text("Saved paths", style = MaterialTheme.typography.titleSmall)
+                    if (sessions.isEmpty() && !loading) EmptyHint("No paths yet. Connect your tag and at least three anchors with measured coordinates. Paths will appear automatically.")
+                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(sessions, key = { it.id }) { session ->
+                            OutlinedButton(onClick = {
+                                loading = true; message = ""
+                                repo.loadPath(session.id) { loaded, error -> if (alive) {
+                                    loading = false
+                                    if (error != null) message = error
+                                    else { route = loaded; selectedTag = null; fit++ }
+                                } }
+                            }, enabled = !loading, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+                                Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                                    Text(pathTime(session.startedAtMs), color = Ink, style = MaterialTheme.typography.titleSmall)
+                                    Text("${session.tags.size} tags \u00b7 ${session.pointCount} positions" +
+                                        when { session.active -> " \u00b7 auto-saving"
+                                            session.interrupted -> " \u00b7 recovered after app closed"
+                                            else -> "" },
+                                        color = Muted, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+                } else route?.let { saved ->
+                    val tags = saved.trails.keys.toList()
+                    val names = remember(saved) {
+                        val result = mutableMapOf<String, String>()
+                        var anchors = 0; var tagCount = 0
+                        saved.devices.forEach { d ->
+                            result[d.key] = if (d.role == "anchor") "A${++anchors}" else "T${++tagCount}"
+                        }
+                        tags.forEach { if (it !in result) result[it] = "T${++tagCount}" }
+                        result
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { route = null; message = ""; refresh() }) { Text("All paths") }
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { fit++ }) { Text("Fit path") }
+                    }
+                    Text(pathTime(saved.summary.startedAtMs) + " \u2013 " + pathTime(saved.summary.endedAtMs),
+                        color = Muted, style = MaterialTheme.typography.bodySmall)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected = selectedTag == null, onClick = { selectedTag = null; fit++ }, label = { Text("All tags") })
+                        tags.forEach { tag ->
+                            FilterChip(selected = selectedTag == tag, onClick = { selectedTag = tag; fit++ },
+                                label = { Text("${names[tag] ?: "Tag"} \u00b7 ${tag.takeLast(5)}") })
+                        }
+                    }
+                    val trails = saved.trails.filterKeys { selectedTag == null || it == selectedTag }
+                    val positions = saved.positions.filterKeys { it in trails }
+                    key(saved.summary.id) {
+                        LocalizationMap(saved.devices, positions, names, emptyMap(), trails, fit,
+                            Modifier.fillMaxWidth().weight(1f).clip(MaterialTheme.shapes.medium), fitTrails = true)
+                    }
+                    Text("Outlined dot: start \u00b7 Solid dot: last position \u00b7 Gaps: no valid position",
+                        color = Muted, style = MaterialTheme.typography.bodySmall)
+                    Text("${saved.summary.pointCount} recorded positions \u00b7 ${saved.summary.tags.size} tags" +
+                        if (saved.trails.values.sumOf { it.size } < saved.summary.pointCount) " \u00b7 Map preview simplified" else "",
+                        color = Muted, style = MaterialTheme.typography.bodySmall)
+                    if (saved.summary.interrupted) Text("Recovered after the app closed unexpectedly.", color = Muted)
+                    if (message.isNotBlank()) FeedbackMessage(message)
+                    Text(if (saved.summary.active) "This path updates automatically while data is received."
+                        else "Automatically removed one month after its last position.",
+                        color = Muted, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun MapLegend() {
     FlowRow(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -2529,7 +2664,7 @@ private class MapViewport {
 
 @Composable
 private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, Position>, names: Map<String, String>,
-                            states: Map<String, DeviceState>, trails: Map<String, List<TrailPoint>>, fitRequest: Int, modifier: Modifier = Modifier, viewport: MapViewport? = null) {
+                            states: Map<String, DeviceState>, trails: Map<String, List<TrailPoint>>, fitRequest: Int, modifier: Modifier = Modifier, viewport: MapViewport? = null, fitTrails: Boolean = false) {
     val ink = Ink
     val muted = Muted
     val green = Positive
@@ -2541,7 +2676,7 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
     val grid = Grid
     val mapSurface = androidx.compose.material3.MaterialTheme.colorScheme.surface
     val anchors = devices.filter { it.role == "anchor" }
-    val points = anchors.map { it.x to it.y } + positions.values.map { it.x to it.y }
+    val points = mapFitPoints(devices, positions, trails, fitTrails)
     if (points.isEmpty()) return
     val view = viewport ?: remember { MapViewport() }
     var zoom by view.zoom
@@ -2748,6 +2883,11 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
                         val at = screen(point.x, point.y)
                         if (index == 0 || point.startsSegment) path.moveTo(at.x, at.y)
                         else path.lineTo(at.x, at.y)
+                    }
+                    if (fitTrails) history.firstOrNull()?.let { start ->
+                        val at = screen(start.x, start.y)
+                        drawCircle(mapSurface, 4.dp.toPx(), at)
+                        drawCircle(tagColor(tag), 4.dp.toPx(), at, style = Stroke(2.dp.toPx()))
                     }
                     drawPath(path, tagColor(tag).copy(alpha = .65f),
                         style = Stroke(width = 2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round,

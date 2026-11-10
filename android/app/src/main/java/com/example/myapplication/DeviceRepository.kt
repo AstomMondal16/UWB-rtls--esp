@@ -56,6 +56,12 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private val csvStore = CsvSessionStore(collectionFile)
     private val recorder = TelemetryRecorder(csvStore)
     private val trailStore = TagTrailStore()
+    private val pathStorage = lazy { PathSessionStore(File(appContext.filesDir, "paths")) }
+    private var pathRecording = false
+    private var pathPointCount = 0
+    private var pathError = ""
+    private var pathCleanupWarning = ""
+    @Volatile private var nextPathRetryAtMs = 0L
     @Volatile private var collecting = false
     private var recordingStartCount = csvStore.count()
     private var recordingStartedAtMs: Long? = null
@@ -67,6 +73,20 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private var status = "Waiting for devices"
 
     init {
+        pathCleanupWarning = PathCleanupJob.schedule(appContext).orEmpty()
+        workers.scheduleWithFixedDelay({
+            val cleanupWarning = PathCleanupJob.schedule(appContext).orEmpty()
+            synchronized(lock) { pathCleanupWarning = cleanupWarning }
+            automaticPathStore()?.let { store ->
+                try {
+                    store.maintenance(System.currentTimeMillis())
+                    synchronized(lock) { pathRecording = store.isRecording(); pathPointCount = store.pointCount() }
+                } catch (error: IOException) {
+                    synchronized(lock) { pathError = "Path cleanup failed: ${error.message}" }
+                }
+                publish()
+            }
+        }, 0, 1, TimeUnit.HOURS)
         workers.scheduleWithFixedDelay({ scan() }, 0, 2, TimeUnit.SECONDS)
         workers.scheduleWithFixedDelay({ poll() }, 0, 25, TimeUnit.MILLISECONDS)
     }
@@ -85,7 +105,8 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         return DashboardSnapshot(devices.toList(), liveDiscovered, onlineStates,
             solvePositions(devices, ranges, now), status, collecting, csvStore.count(),
             if (calibration.isEmpty()) "" else "${calibration.values.minOf { it.samples.size }}/100 samples per anchor",
-            streamingPending, recordingStartCount, recordingStartedAtMs, trailStore.snapshot(now))
+            streamingPending, recordingStartCount, recordingStartedAtMs, trailStore.snapshot(now), pathRecording, pathPointCount,
+            listOf(pathError, pathCleanupWarning).filter { it.isNotBlank() }.joinToString("\n"))
     }
 
     private fun publish() {
@@ -217,99 +238,114 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         }
     }
 
-    private fun accept(device: DeviceRecord, ip: String, sample: JSONObject) = synchronized(lock) {
-        if (devices.none { it.key == device.key }) return@synchronized
-        val oldKey = device.key
-        val mac = normalizeMac(sample.optString("mac")).ifBlank { device.mac }
-        if (device.mac.isNotBlank() && mac != device.mac) {
-            status = "Device identity mismatch for ${device.mac}"
-            return@synchronized
-        }
-        if (mac.isNotBlank() && device.mac != mac) {
-            val index = devices.indexOfFirst { it.key == oldKey }
-            if (devices.any { it.mac == mac && it.key != oldKey }) throw IOException("Device MAC $mac is already configured")
-            if (index >= 0) {
-                val security = LastWifiCredentialStore.loadDeviceSecurity(appContext, oldKey)
-                if (security.loadError.isNotBlank() || !LastWifiCredentialStore.saveDeviceSecurity(appContext, mac, security))
-                    throw IOException("Could not preserve TLS settings while learning device MAC")
-                devices[index] = devices[index].copy(mac = mac, ip = ip)
-                prefs.edit().putString("devices", encodeDevices(devices)).apply()
+    private fun accept(device: DeviceRecord, ip: String, sample: JSONObject) {
+        val pathStore = automaticPathStore() // Disk recovery never holds the receiver lock.
+        synchronized(lock) {
+            if (closed.get() || devices.none { it.key == device.key }) return@synchronized
+            val oldKey = device.key
+            val mac = normalizeMac(sample.optString("mac")).ifBlank { device.mac }
+            if (device.mac.isNotBlank() && mac != device.mac) {
+                status = "Device identity mismatch for ${device.mac}"
+                return@synchronized
             }
-            states.remove(oldKey)
-            tlsConfigurations.remove(oldKey)
-        } else {
-            val index = devices.indexOfFirst { it.key == oldKey }
-            if (index >= 0 && devices[index].ip != ip) {
-                devices[index] = devices[index].copy(ip = ip)
-                prefs.edit().putString("devices", encodeDevices(devices)).apply()
-            }
-        }
-        val source = mac.ifBlank { oldKey }
-        val oldSample = states[source]?.sample
-        states[source] = DeviceState(true, sample)
-        if (needsSystemClock(sample) && clockSyncing.add(source)) workers.execute {
-            try {
-                val connection = openApiConnection("$ip/api/time", source)
-                withReusableDeviceConnection(connection) { sendSystemClock(connection) }
-            } catch (error: Exception) {
-                setStatus("Clock sync failed for $source: ${error.message ?: error.javaClass.simpleName}")
-            } finally { clockSyncing.remove(source) }
-        }
-        val sourceRole = sample.optString("role", device.role)
-        val receivedAt = sample.optLong("_received_at", System.currentTimeMillis())
-        if (oldSample != null && sample.optLong("timestamp_ms") < oldSample.optLong("timestamp_ms")) breakDeviceTrail(source)
-        val list = sample.optJSONArray("ranges") ?: org.json.JSONArray()
-        if (!sample.optBoolean("valid")) {
-            breakDeviceTrail(source)
-        } else if (list.length() > 0) {
-            for (i in 0 until list.length()) {
-                val item = list.optJSONObject(i) ?: continue
-                val peer = normalizeMac(item.optString("peer"))
-                val distance = item.optDouble("distance_m", Double.NaN)
-                if (peer.isBlank()) continue
-                val anchor = if (sourceRole == "tag") peer else source
-                val tag = if (sourceRole == "tag") source else peer
-                if (!distance.isFinite() || distance <= 0) {
-                    ranges.remove(anchor to tag); trailStore.breakTag(tag); continue
+            if (mac.isNotBlank() && device.mac != mac) {
+                val index = devices.indexOfFirst { it.key == oldKey }
+                if (devices.any { it.mac == mac && it.key != oldKey }) throw IOException("Device MAC $mac is already configured")
+                if (index >= 0) {
+                    val security = LastWifiCredentialStore.loadDeviceSecurity(appContext, oldKey)
+                    if (security.loadError.isNotBlank() || !LastWifiCredentialStore.saveDeviceSecurity(appContext, mac, security))
+                        throw IOException("Could not preserve TLS settings while learning device MAC")
+                    devices[index] = devices[index].copy(mac = mac, ip = ip)
+                    prefs.edit().putString("devices", encodeDevices(devices)).apply()
                 }
-                val age = item.optLong("age_ms", 0).coerceAtLeast(0)
-                ranges[anchor to tag] = RangeReading(distance,
-                    if (item.isNull("rx_power_dbm")) null else item.optDouble("rx_power_dbm"),
-                    receivedAt - age, "$source:${item.optLong("timestamp_ms", sample.optLong("timestamp_ms", -1))}")
-                if (sourceRole == "anchor") {
-                    val target = calibration[anchor]
-                    val stamp = item.optLong("timestamp_ms", -1)
-                    if (target != null && stamp >= 0 && target.seen.add(stamp)) target.samples.add(distance)
+                states.remove(oldKey)
+                tlsConfigurations.remove(oldKey)
+            } else {
+                val index = devices.indexOfFirst { it.key == oldKey }
+                if (index >= 0 && devices[index].ip != ip) {
+                    devices[index] = devices[index].copy(ip = ip)
+                    prefs.edit().putString("devices", encodeDevices(devices)).apply()
                 }
             }
-        } else if (sample.optBoolean("valid")) {
-            val peer = normalizeMac(sample.optString("peer"))
-            val distance = sample.optDouble("distance_m", Double.NaN)
-            if (peer.isNotBlank()) {
-                val anchor = if (sourceRole == "tag") peer else source
-                val tag = if (sourceRole == "tag") source else peer
-                if (distance.isFinite() && distance > 0) {
-                    ranges[anchor to tag] = RangeReading(distance, null,
-                        receivedAt - sample.optLong("age_ms", 0).coerceAtLeast(0), "$source:${sample.optLong("timestamp_ms", -1)}")
-                } else {
-                    ranges.remove(anchor to tag)
-                    trailStore.breakTag(tag)
+            val source = mac.ifBlank { oldKey }
+            val oldSample = states[source]?.sample
+            states[source] = DeviceState(true, sample)
+            if (needsSystemClock(sample) && clockSyncing.add(source)) workers.execute {
+                try {
+                    val connection = openApiConnection("$ip/api/time", source)
+                    withReusableDeviceConnection(connection) { sendSystemClock(connection) }
+                } catch (error: Exception) {
+                    setStatus("Clock sync failed for $source: ${error.message ?: error.javaClass.simpleName}")
+                } finally { clockSyncing.remove(source) }
+            }
+            val sourceRole = sample.optString("role", device.role)
+            val receivedAt = sample.optLong("_received_at", System.currentTimeMillis())
+            if (oldSample != null && sample.optLong("timestamp_ms") < oldSample.optLong("timestamp_ms")) breakDeviceTrail(source)
+            val list = sample.optJSONArray("ranges") ?: org.json.JSONArray()
+            if (!sample.optBoolean("valid")) {
+                breakDeviceTrail(source)
+            } else if (list.length() > 0) {
+                for (i in 0 until list.length()) {
+                    val item = list.optJSONObject(i) ?: continue
+                    val peer = normalizeMac(item.optString("peer"))
+                    val distance = item.optDouble("distance_m", Double.NaN)
+                    if (peer.isBlank()) continue
+                    val anchor = if (sourceRole == "tag") peer else source
+                    val tag = if (sourceRole == "tag") source else peer
+                    if (!distance.isFinite() || distance <= 0) {
+                        ranges.remove(anchor to tag); trailStore.breakTag(tag); continue
+                    }
+                    val age = item.optLong("age_ms", 0).coerceAtLeast(0)
+                    ranges[anchor to tag] = RangeReading(distance,
+                        if (item.isNull("rx_power_dbm")) null else item.optDouble("rx_power_dbm"),
+                        receivedAt - age, "$source:${item.optLong("timestamp_ms", sample.optLong("timestamp_ms", -1))}")
+                    if (sourceRole == "anchor") {
+                        val target = calibration[anchor]
+                        val stamp = item.optLong("timestamp_ms", -1)
+                        if (target != null && stamp >= 0 && target.seen.add(stamp)) target.samples.add(distance)
+                    }
+                }
+            } else if (sample.optBoolean("valid")) {
+                val peer = normalizeMac(sample.optString("peer"))
+                val distance = sample.optDouble("distance_m", Double.NaN)
+                if (peer.isNotBlank()) {
+                    val anchor = if (sourceRole == "tag") peer else source
+                    val tag = if (sourceRole == "tag") source else peer
+                    if (distance.isFinite() && distance > 0) {
+                        ranges[anchor to tag] = RangeReading(distance, null,
+                            receivedAt - sample.optLong("age_ms", 0).coerceAtLeast(0), "$source:${sample.optLong("timestamp_ms", -1)}")
+                    } else {
+                        ranges.remove(anchor to tag)
+                        trailStore.breakTag(tag)
+                    }
                 }
             }
+            val positions = solvePositions(devices, ranges, receivedAt)
+            val evidence = positions.mapValues { (tag, position) ->
+                position.anchors.sorted().joinToString("|") { anchor -> "$anchor:${ranges[anchor to tag]?.measurementId}" }
+            }
+            val pathPoints = trailStore.update(positions, evidence, receivedAt)
+            if (pathStore != null && receivedAt >= nextPathRetryAtMs) try {
+                pathStore.record(devices.toList(), pathPoints, receivedAt)
+                pathRecording = pathStore.isRecording()
+                pathPointCount = pathStore.pointCount()
+                if (pathPoints.isNotEmpty()) pathError = ""
+            } catch (error: IOException) {
+                pathRecording = false
+                nextPathRetryAtMs = System.currentTimeMillis() + 30_000
+                runCatching { pathStore.seal() }
+                pathError = "Path saving paused: ${error.message ?: "storage unavailable"}. Retrying automatically."
+                status = pathError
+            }
+            if (collecting) try {
+                recorder.accept(source, ip, sample, positions)
+            } catch (error: IOException) {
+                collecting = false
+                recorder.stop()
+                status = "CSV recording stopped: ${error.message ?: "could not save session data"}"
+            }
+            if (calibration.isNotEmpty() && calibration.values.all { it.samples.size >= 100 }) finishCalibration()
         }
-        val positions = solvePositions(devices, ranges, receivedAt)
-        val evidence = positions.mapValues { (tag, position) ->
-            position.anchors.sorted().joinToString("|") { anchor -> "$anchor:${ranges[anchor to tag]?.measurementId}" }
-        }
-        trailStore.update(positions, evidence, receivedAt)
-        if (collecting) try {
-            recorder.accept(source, ip, sample, positions)
-        } catch (error: IOException) {
-            collecting = false
-            recorder.stop()
-            status = "CSV recording stopped: ${error.message ?: "could not save session data"}"
-        }
-        if (calibration.isNotEmpty() && calibration.values.all { it.samples.size >= 100 }) finishCalibration()
     }
 
     fun upsert(record: DeviceRecord, oldKey: String? = null): String? {
@@ -318,6 +354,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
             synchronized(lock) {
                 val index = devices.indexOfFirst { it.key == oldKey || it.key == clean.key }
                 if (index >= 0) devices[index] = clean else devices.add(clean)
+                finishPathForDeviceChange()
                 trailStore.clear()
                 prefs.edit().putString("devices", encodeDevices(devices)).apply()
                 status = "${if (index >= 0) "Updated" else "Added"} ${clean.key}"
@@ -328,6 +365,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
 
     fun remove(key: String) {
         synchronized(lock) {
+            finishPathForDeviceChange()
             trailStore.clear()
             devices.removeAll { it.key == key }
             ranges.keys.removeAll { it.first == key || it.second == key }
@@ -341,6 +379,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
 
     fun clear() {
         synchronized(lock) {
+            finishPathForDeviceChange()
             devices.clear(); ranges.clear(); states.clear(); trailStore.clear(); tlsConfigurations.clear()
             prefs.edit().putString("devices", "[]").apply()
             status = "All devices cleared"
@@ -509,7 +548,10 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                         }
                         readDeviceResponse(connection, MAX_CONTROL_BYTES)
                     }
-                }.onSuccess { succeeded++ }.onFailure { if (failure == null) failure = it.message }
+                }.onSuccess {
+                    succeeded++
+                    if (!value) synchronized(lock) { breakDeviceTrail(deviceId) }
+                }.onFailure { if (failure == null) failure = it.message }
             }
             synchronized(lock) {
                 streamingPending = false
@@ -555,11 +597,52 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         }
     }
 
+    private fun <T> pathTask(action: () -> T, callback: (T?, String?) -> Unit) {
+        exportWorker.execute {
+            val result = runCatching(action)
+            if (result.isFailure) publish()
+            main.post {
+                if (!closed.get()) callback(result.getOrNull(), result.exceptionOrNull()?.let {
+                    it.message ?: "Could not access saved paths"
+                })
+            }
+        }
+    }
+
+    internal fun listPaths(callback: (List<SavedPathSummary>?, String?) -> Unit) =
+        pathTask({ pathStorage.value.list() }, callback)
+
+    internal fun loadPath(id: String, callback: (SavedPath?, String?) -> Unit) =
+        pathTask({ pathStorage.value.load(id) }, callback)
+
+    private fun automaticPathStore(): PathSessionStore? {
+        if (closed.get() || System.currentTimeMillis() < nextPathRetryAtMs) return null
+        return try { pathStorage.value } catch (error: Exception) {
+            nextPathRetryAtMs = System.currentTimeMillis() + 30_000
+            synchronized(lock) {
+                pathError = "Automatic path saving is unavailable: ${error.message ?: "storage error"}. Retrying automatically."
+                status = pathError
+            }
+            null
+        }
+    }
+
+    private fun finishPathForDeviceChange() {
+        if (pathRecording) {
+            runCatching { pathStorage.value.seal() }
+            pathRecording = false
+        }
+    }
+
     fun close() {
         closed.set(true)
         main.removeCallbacks(publishLatest)
         workers.shutdownNow(); pollWorkers.shutdownNow(); exportWorker.shutdown()
-        synchronized(lock) { tlsConfigurations.clear() }
+        synchronized(lock) {
+            pathRecording = false
+            if (pathStorage.isInitialized()) runCatching { pathStorage.value.seal() }
+            tlsConfigurations.clear()
+        }
     }
 
 }
