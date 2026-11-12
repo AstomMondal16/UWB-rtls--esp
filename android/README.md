@@ -114,15 +114,77 @@ The dashboard API has no client API key; use it only on a trusted local network.
   [sensor power behavior](../SENSOR_POWER.md).
 - **CSV:** Start recording from **Actions**. Recording appends to an app-private
   session file with a 512 MiB limit and retains prior records across stops.
-  Choose **Export CSV** to save a streaming export. The export reports its row
+  In **Settings > Files > CSV fields**, device timestamp, MAC, IP and role are
+  always included. Choose three optional groups: **IMU**, **Battery** (percentage
+  and voltage), and **UWB** (ranging, raw CIR and movement speed). Changes save
+  automatically. All groups default to on for the original 44-column export;
+  turning them all off saves device details only. Stop CSV saves the current
+  session. **Settings > Files > Export all stored data** exports every retained
+  session, including recordings whose save picker was cancelled, and stops any
+  active recording. Both use the field settings directly, without a selection
+  popup. The dashboard footer only shows device and stored-record counts.
+  Cancelling the file destination keeps captured data available. Exports report
   count, capture time range, and missed telemetry sequence numbers; corrupted
   session rows fail the export instead of being omitted. UWB, IMU and observable
   battery updates are recorded independently for all configured devices.
-  Exports include solved tag positions and freeze their end row at Stop.
+  Selected columns keep the existing schema order, precision, units, timestamp
+  formatting and zero-for-missing values. All rows in the frozen recording
+  range are exported. Selecting fields changes only the downloaded CSV; raw
+  captures remain intact for later exports. **iq** includes the full raw I/Q
+  array. Both the row range and chosen fields are frozen before the file picker
+  and retained through activity recreation. The end row stays fixed at Stop.
 - **Tag trails:** Recent valid positions form a separate bounded trail per tag;
   disconnects, invalid positions and long gaps start new segments.
+  In **Settings > Appearance > Localization map > Trail disappears after**,
+  choose 5 seconds, 10 seconds, 30 seconds, 1 minute or 2 minutes (default).
+  Each point ages out on both live maps, including while paused or disconnected.
+  The choice persists across restarts. The bounded live buffer holds up to 2,400
+  points per tag, enough for two minutes at 20 position updates/s. At higher
+  combined update rates, the live preview is thinned to preserve the time span
+  and disconnect gaps. Automatic one-month recording still receives every new
+  valid position; the saved-history viewer is independent of this setting.
 - **Calibrate:** Follow the in-app calibration prompt with a measured distance
   between the devices being calibrated.
+
+Main navigation and dashboard tabs use short directional slide/fade transitions. In Settings, swipe left/right between **Appearance**, **Files**,
+**About** and **Device**, or tap a tab to slide to it. The highlighted tab follows
+the pager; each page scrolls vertically. Settings remembers the last settled tab
+when you leave and return. Raw IMU readings and device diagnostics expand/collapse
+smoothly. **Settings > Appearance > Behaviour > Reduce animations** makes tab taps
+instant and removes the animated snap after a swipe; direct finger dragging stays
+available. Effects also follow Android's system animation duration scale.
+Telemetry updates do not restart page transitions.
+
+Startup opens the repository and counts saved CSV rows on an I/O worker. The
+dashboard draws underneath the opaque splash before its 160 ms fade, instead of
+being first composed during the fade. The cold-start logo wave lasts 650 ms;
+returning from a restored activity skips that minimum display time. Loading
+failures show Retry. Leaving during startup cancels loading and closes any
+repository it created; pending CSV destinations survive activity recreation.
+
+Dashboard sections clip their contents and keep live values inside their bounds.
+While any saved device is online, the map reserves its 320 dp viewport, legend
+and position readout, even while waiting. Motion has a 600 dp scrollable viewport; Battery has a 144 dp
+scrollable viewport so optional readings and large fonts stay reachable without
+moving adjacent sections. These bounds apply in tabs or scrolling mode and with
+or without cards. Numeric/status labels do not wrap as readings change.
+
+While connected, the CIR panel reserves a 260 dp plot viewport in live, waiting
+and error states.
+Its header and capture/status lines keep stable bounds; full status messages
+open from the info icon. Magnitude and waterfall rendering are clipped to their
+own plot rectangles. Chart contents and orientation readouts are also clipped
+to their owning sections.
+
+When no saved device is online (including an empty device list), only the
+localization map section is shown. Motion, CIR, Battery and their tab bar are
+hidden, including when the dashboard preference is Scrolling. The bounded map,
+legend, history, fit and fullscreen actions remain available with configured
+anchors/cached positions; without anchors it shows setup guidance. Cached data
+is retained. When any saved device reconnects, the user's previous tab/scrolling
+view and selected tab return automatically. Discovery results or stale states
+for removed devices do not count as online. A paused device that remains online
+keeps the normal layout.
 
 For ESP-IDF setup, firmware configuration, IMU wiring, CIR enablement, and API
 details, see the repository's [main README](../README.md).

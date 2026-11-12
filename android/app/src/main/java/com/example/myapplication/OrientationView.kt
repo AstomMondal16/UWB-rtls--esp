@@ -12,6 +12,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -31,21 +33,22 @@ internal fun OrientationView(estimate: OrientationEstimate?, zeroReference: Muta
     val minimumReadoutWidth = (80 * LocalDensity.current.fontScale.coerceAtLeast(1f)).dp
     var reference by zeroReference
     val rotation = estimate?.rotation?.let { q -> reference?.let(q::relativeTo) ?: q }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.fillMaxWidth().clipToBounds(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Device orientation", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
             OutlinedButton(enabled = rotation != null, onClick = {
                 reference = if (reference == null) estimate?.rotation else null
             }) { Text(if (reference == null) "Set zero" else "Clear zero") }
         }
-        if (rotation == null) {
-            Text("Waiting for a valid orientation sample", color = colors.onSurfaceVariant, fontSize = 14.sp)
-        } else {
-            val angles = rotation.eulerDegrees()
-            Canvas(Modifier.fillMaxWidth().height(180.dp).semantics {
+        val angles = rotation?.eulerDegrees()
+        Box(Modifier.fillMaxWidth().height(180.dp).clip(MaterialTheme.shapes.medium)
+            .background(colors.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+            if (rotation == null) {
+                Text("Waiting for a valid orientation sample", color = colors.onSurfaceVariant,
+                    fontSize = 14.sp, modifier = Modifier.padding(12.dp))
+            } else Canvas(Modifier.fillMaxSize().semantics {
                 contentDescription = "Device orientation preview with sensor X, Y and Z axes"
-            }.clip(MaterialTheme.shapes.medium)
-                .background(colors.surfaceContainerHigh)) {
+            }) {
                 val scale = size.minDimension * .22f
                 fun project(x: Double, y: Double, z: Double): Pair<Offset, Double> {
                     val p = rotation.rotate(x, y, z)
@@ -84,20 +87,23 @@ internal fun OrientationView(estimate: OrientationEstimate?, zeroReference: Muta
                         })
                 }
             }
-            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("Roll" to angles.first, "Pitch" to angles.second, "Yaw (relative)" to angles.third).forEachIndexed { index, (label, value) ->
-                    Column(Modifier.widthIn(min = minimumReadoutWidth).weight(1f)) {
-                        Text(label, color = colors.onSurfaceVariant, fontSize = 12.sp)
-                        Text(String.format(Locale.US, "%+.1f\u00b0", value),
-                            color = listOf(colors.error, colors.positive, colors.axisZ)[index],
-                            fontFamily = FontFamily.Monospace, fontSize = 20.sp)
-                    }
+        }
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Roll" to angles?.first, "Pitch" to angles?.second, "Yaw (relative)" to angles?.third).forEachIndexed { index, (label, value) ->
+                Column(Modifier.widthIn(min = minimumReadoutWidth).weight(1f)) {
+                    Text(label, color = colors.onSurfaceVariant, fontSize = 12.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(value?.let { String.format(Locale.US, "%+.1f\u00b0", it) } ?: "--",
+                        color = listOf(colors.error, colors.positive, colors.axisZ)[index],
+                        fontFamily = FontFamily.Monospace, fontSize = 20.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
         Text(if (estimate?.stationary == true) "Still: drift correction active. Yaw is relative."
             else "Hold still briefly to reduce drift. Set zero to mark your starting direction.",
-            color = colors.onSurfaceVariant, fontSize = 12.sp)
+            color = colors.onSurfaceVariant, fontSize = 12.sp, minLines = 3, maxLines = 3,
+            overflow = TextOverflow.Ellipsis)
     }
 }

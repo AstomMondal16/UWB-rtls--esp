@@ -455,10 +455,12 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     }
 
     internal fun exportCsv(output: OutputStream, callback: (Result<CsvExportSummary>) -> Unit) =
-        exportCsv(output, 0, null, callback)
+        exportCsv(output, 0, null, callback = callback)
 
     internal fun exportCsv(output: OutputStream, startingAtRecord: Int, endingAtRecord: Int? = null,
+                           fields: Collection<String> = CsvSessionStore.SENSOR_FIELDS,
                            callback: (Result<CsvExportSummary>) -> Unit) {
+        val frozenFields = fields.toList()
         val end = synchronized(lock) {
             // Stop/export is ordered after every accepted synchronous append.
             val frozenEnd = endingAtRecord ?: csvStore.count().also { collecting = false; recorder.stop() }
@@ -467,7 +469,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
         }
         publish()
         exportWorker.execute {
-            val result = runCatching { csvStore.exportCsv(output, startingAtRecord, end) }
+            val result = runCatching { csvStore.exportCsv(output, startingAtRecord, end, frozenFields) }
             main.post {
                 result.onSuccess { summary ->
                     val first = summary.firstReceivedAt ?: "unknown"

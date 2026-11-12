@@ -1,12 +1,34 @@
 # CSV and terminal output
 
-Saved CSV exports use these 44 columns; terminal output labels the corresponding values with the same field names:
+By default (with all three sensor groups enabled), saved CSV exports use these 44 columns; terminal output labels the corresponding values with the same field names:
 
 ```csv
 timestamp,source_address,ip_address,role,range,distance_m_unfiltered,poll_tx,poll_rx,ack_tx,ack_rx,range_tx,range_rx,report_tx,report_rx,local_rx_power_dbm,peer_rx_power_dbm,cir_power,rx_frame_info,preamble_count,tof_ticks,tx_power,iq,sequence,timestamp_ms,rx_timestamp,peer_address,frame_type,first_path_index,start_index,sample_count,cir_preamble_count,age_ms,capture_us,capture_interval_ms,sample_period_ns,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,battery,battery_voltage,speed_mps
 ```
 
 `range` is the existing filtered UWB distance in meters; `distance_m_unfiltered` is the raw distance in meters. The spelling `Renge` was normalized to `range`. `frame_type` and `first_path_index` are separate fields. The first `preamble_count` is the UWB receiver count; `cir_preamble_count` is the CIR capture count, avoiding duplicate column names.
+
+## Choose CSV columns
+
+Under Settings > Files > CSV fields, device details (`timestamp`, `source_address`,
+`ip_address`, `role`) are mandatory in every export and cannot be unchecked.
+There are exactly three optional checkboxes:
+
+- IMU: all acceleration and gyroscope axes.
+- Battery: percentage and voltage.
+- UWB: ranging, transmit power, raw CIR I/Q, capture metadata and movement speed.
+
+Changes save automatically and apply to Stop CSV and Settings > Files > Export
+all stored data without a field picker on the save buttons. All three default to on. Turning all three off saves
+only the four device-detail columns, including after a restart. Older partial
+field preferences enable the entire group containing each previously selected
+field; missing mandatory columns are restored automatically.
+
+Columns retain the order shown above; enabling all groups stays byte-compatible
+with the original export. Choices never filter rows or change values, precision,
+units, timestamps or missing-value zeros. UWB includes the full raw I/Q array.
+Original app-private captures stay available to re-export different groups.
+Firmware terminal output keeps its existing full field set.
 
 ## Values and units
 

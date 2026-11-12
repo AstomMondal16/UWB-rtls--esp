@@ -7,6 +7,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.time.Instant
 
 class CsvSessionStoreTest {
     private fun raw() = JSONObject().put("valid", true).put("format_version", 1)
@@ -134,5 +135,113 @@ class CsvSessionStoreTest {
             assertEquals(key, 0.0, sensorCsvValue(row, key).toDouble(), 0.0)
         assertTrue(raw.getJSONObject("timestamps").isNull("poll_rx"))
         assertEquals("[[0,0]]", sensorCsvValue(row, "iq"))
+    }
+
+    @Test fun selectedColumnsKeepEveryBurstRowAndFreezeTheEndBeforeLaterSamples() {
+        val file = Files.createTempFile("selected-csv", ".jsonl").toFile()
+        try {
+            val store = CsvSessionStore(file)
+            val base = Instant.parse("2026-11-10T18:00:00Z")
+            repeat(202) { i ->
+                store.append(JSONObject().put("received_at_utc", base.plusMillis(i * 10L).toString())
+                    .put("source_address", if (i % 2 == 0) "AA:BB:CC:DD:EE:01" else "AA:BB:CC:DD:EE:02")
+                    .put("source_ip", "192.168.1.100").put("role", "tag")
+                    .put("valid", true).put("distance_m", i + 1.23456789012345)
+                    .put("imu_valid", true).put("accel", JSONArray(listOf(i / 1000.0, -0.125, 0.987654321)))
+                    .put("gyro", JSONArray(listOf(1.0, 2.0, -i / 100.0)))
+                    .put("battery_valid", true).put("battery_percent", 80).put("battery_voltage", 3.7 + i / 10000.0)
+                    .put("cir", cir()).toString())
+            }
+            val original = file.readBytes()
+            // 200 is the Stop boundary; rows 200 and 201 arrived while export setup was pending.
+            val fields = listOf("battery_voltage", "gyro_z", "accel_x", "iq", "range", "source_address", "timestamp")
+            val output = ByteArrayOutputStream()
+            val summary = store.exportCsv(output, 0, 200, fields)
+            assertEquals(200, summary.records)
+            assertEquals(202, store.count())
+            assertEquals(base.toString(), summary.firstReceivedAt)
+            assertEquals(base.plusMillis(1990).toString(), summary.lastReceivedAt)
+            assertArrayEquals(original, file.readBytes())
+            val header = listOf("timestamp", "source_address", "ip_address", "role", "range", "iq", "accel_x", "gyro_z", "battery_voltage")
+            assertEquals(header.joinToString(",", transform = ::csvEscape), output.toString("UTF-8").removePrefix("\uFEFF").substringBefore("\r\n"))
+            val report = File("build/reports/csv-custom-fields").apply { mkdirs() }
+            File(report, "selected.csv").writeBytes(output.toByteArray())
+            File(report, "recorded.jsonl").writeBytes(original)
+            File(report, "expected.json").writeText(JSONObject().put("rows", 200)
+                .put("raw_rows", 202).put("fields", JSONArray(header)).put("iq_pairs", 1016).toString())
+        } finally { file.delete() }
+    }
+
+    @Test fun choosingAllFieldsKeepsTheOriginalCsvBytesAndRemovesDuplicateColumns() {
+        val file = Files.createTempFile("all-fields-csv", ".jsonl").toFile()
+        try {
+            val store = CsvSessionStore(file)
+            store.append(JSONObject().put("received_at_utc", "2026-11-10T18:00:00Z")
+                .put("valid", true).put("distance_m", 1.23456789012345).put("cir", cir()).toString())
+            val default = ByteArrayOutputStream(); store.exportCsv(default)
+            val selected = ByteArrayOutputStream()
+            store.exportCsv(selected, fields = CsvSessionStore.SENSOR_FIELDS.reversed() + "timestamp")
+            assertArrayEquals(default.toByteArray(), selected.toByteArray())
+            assertEquals(44, CsvSessionStore.SENSOR_FIELDS.size)
+            assertEquals(44, CsvSessionStore.SENSOR_FIELDS.distinct().size)
+        } finally { file.delete() }
+    }
+
+    @Test fun unknownFieldSelectionsFailBeforeWritingAndPreserveTheRecording() {
+        val file = Files.createTempFile("invalid-fields-csv", ".jsonl").toFile()
+        try {
+            val store = CsvSessionStore(file)
+            store.append(JSONObject().put("received_at_utc", "2026-11-10T18:00:00Z").toString())
+            val original = file.readBytes()
+            for (fields in listOf(listOf("unknown_field"), listOf("timestamp", "unknown_field"))) {
+                val output = ByteArrayOutputStream()
+                try { store.exportCsv(output, fields = fields); fail("Expected invalid selection to fail") }
+                catch (_: java.io.IOException) { }
+                assertEquals(0, output.size())
+                assertArrayEquals(original, file.readBytes())
+                assertEquals(1, store.count())
+            }
+        } finally { file.delete() }
+    }
+
+    @Test fun rememberedFieldsKeepRequiredDetailsAndExpandLegacyChoicesIntoGroups() {
+        val required = CsvSessionStore.REQUIRED_FIELDS
+        assertEquals(CsvSessionStore.SENSOR_FIELDS, CsvSessionStore.restoredExportFields(null))
+        assertEquals(required, CsvSessionStore.restoredExportFields(emptyList()))
+        assertEquals(required, CsvSessionStore.restoredExportFields(listOf("removed_field")))
+        val groups = CsvSessionStore.OPTIONAL_FIELD_GROUPS
+        assertEquals(listOf("IMU", "Battery", "UWB"), groups.keys.toList())
+        assertEquals(CsvSessionStore.orderedExportFields(groups.getValue("IMU") + groups.getValue("UWB")),
+            CsvSessionStore.restoredExportFields(listOf("gyro_z", "removed_field", "timestamp", "iq", "iq")))
+        assertEquals(required + "gyro_z", CsvSessionStore.orderedExportFields(listOf("gyro_z", "timestamp", "timestamp")))
+        assertEquals(required, CsvSessionStore.orderedExportFields(emptyList()))
+    }
+
+    @Test fun allEightSensorGroupCombinationsAlwaysExportDeviceDetailsAndEveryRow() {
+        val file = Files.createTempFile("group-fields-csv", ".jsonl").toFile()
+        try {
+            val store = CsvSessionStore(file)
+            repeat(3) { store.append(JSONObject().put("source_address", "device-$it").toString()) }
+            val original = file.readBytes()
+            val groups = CsvSessionStore.OPTIONAL_FIELD_GROUPS.values.toList()
+            assertEquals(CsvSessionStore.SENSOR_FIELDS.toSet(),
+                (CsvSessionStore.REQUIRED_FIELDS + groups.flatten()).toSet())
+            assertEquals(40, groups.flatten().distinct().size)
+            assertEquals(40, groups.flatten().size)
+            for (mask in 0..7) {
+                val chosen = groups.filterIndexed { i, _ -> mask and (1 shl i) != 0 }.flatten()
+                val fields = CsvSessionStore.restoredExportFields(chosen)
+                val output = ByteArrayOutputStream()
+                assertEquals(3, store.exportCsv(output, fields = fields).records)
+                val expected = CsvSessionStore.SENSOR_FIELDS.filter { it in CsvSessionStore.REQUIRED_FIELDS || it in chosen }
+                val lines = output.toString("UTF-8").removePrefix("\uFEFF").split("\r\n").filter { it.isNotEmpty() }
+                assertEquals(expected.joinToString(",", transform = ::csvEscape), lines.first())
+                assertEquals(4, lines.size)
+                assertEquals(expected, fields)
+                assertEquals(fields, CsvSessionStore.restoredExportFields(fields))
+                assertTrue(CsvSessionStore.REQUIRED_FIELDS.all { it in fields })
+            }
+            assertArrayEquals(original, file.readBytes())
+        } finally { file.delete() }
     }
 }

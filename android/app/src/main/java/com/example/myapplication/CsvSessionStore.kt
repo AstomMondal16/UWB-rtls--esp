@@ -64,9 +64,28 @@ internal class CsvSessionStore(
             "capture_interval_ms" to "capture_interval_ms",
             "sample_period_ns" to "sample_period_ns"
         )
-        val SENSOR_FIELDS = listOf("timestamp", "source_address", "ip_address", "role", "range") +
-            UWB_FIELDS.keys + "tx_power" + CIR_FIELDS.keys +
-            listOf("accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z", "battery", "battery_voltage", "speed_mps")
+        val REQUIRED_FIELDS = listOf("timestamp", "source_address", "ip_address", "role")
+        private val IMU_FIELDS = listOf("accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z")
+        val OPTIONAL_FIELD_GROUPS = linkedMapOf(
+            "IMU" to IMU_FIELDS,
+            "Battery" to listOf("battery", "battery_voltage"),
+            "UWB" to (listOf("range") + UWB_FIELDS.keys + "tx_power" + CIR_FIELDS.keys + "speed_mps")
+        )
+        // Keep the existing CSV column order regardless of the settings display order.
+        val SENSOR_FIELDS = REQUIRED_FIELDS + listOf("range") + UWB_FIELDS.keys + "tx_power" +
+            CIR_FIELDS.keys + IMU_FIELDS + listOf("battery", "battery_voltage", "speed_mps")
+
+        fun orderedExportFields(fields: Collection<String>): List<String> {
+            if (fields.any { it !in SENSOR_FIELDS }) throw IOException("CSV selection contains an unknown field")
+            return SENSOR_FIELDS.filter { it in REQUIRED_FIELDS || it in fields }
+        }
+
+        fun restoredExportFields(saved: Collection<String>?): List<String> {
+            if (saved == null) return SENSOR_FIELDS
+            val selected = OPTIONAL_FIELD_GROUPS.values.filter { group -> group.any { it in saved } }.flatten()
+            return orderedExportFields(selected)
+        }
+
     }
 
     // Preferences can lag a completed append after process death; the file is authoritative.
@@ -94,7 +113,9 @@ internal class CsvSessionStore(
 
     @Synchronized
     @Throws(IOException::class)
-    fun exportCsv(output: OutputStream, startingAtRecord: Int = 0, endingAtRecord: Int = recordCount): CsvExportSummary {
+    fun exportCsv(output: OutputStream, startingAtRecord: Int = 0, endingAtRecord: Int = recordCount,
+        fields: Collection<String> = SENSOR_FIELDS): CsvExportSummary {
+        val orderedFields = orderedExportFields(fields)
         if (!file.isFile || recordCount == 0) throw IOException("No CSV records are available")
         if (startingAtRecord !in 0..endingAtRecord || endingAtRecord > recordCount) throw IOException("Invalid CSV recording start position")
 
@@ -121,7 +142,6 @@ internal class CsvSessionStore(
         }
         if (selectedRows == 0) throw IOException("No CSV records are available for this recording")
 
-        val orderedFields = SENSOR_FIELDS
         OutputStreamWriter(output, StandardCharsets.UTF_8).buffered().use { writer ->
             writer.write('\uFEFF'.code)
             writer.write(orderedFields.joinToString(",", transform = ::csvEscape))

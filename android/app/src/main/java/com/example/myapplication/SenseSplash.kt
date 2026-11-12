@@ -21,10 +21,12 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 
 @Composable
-internal fun SenseSplash() {
+internal fun SenseSplash(animate: Boolean = true) {
     val logo = ImageBitmap.imageResource(R.drawable.sense_logo)
-    val progress = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { progress.animateTo(1f, tween(1200, easing = LinearEasing)) }
+    val progress = remember { Animatable(if (animate) 0f else 1f) }
+    LaunchedEffect(animate) {
+        if (animate) progress.animateTo(1f, tween(650, easing = LinearEasing)) else progress.snapTo(1f)
+    }
     val background = MaterialTheme.colorScheme.background
     Box(Modifier.fillMaxSize().background(background).padding(24.dp),
         contentAlignment = Alignment.Center) {

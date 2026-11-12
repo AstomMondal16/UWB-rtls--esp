@@ -93,8 +93,11 @@ cursor/replay API with independent sequence/timestamps, including battery.
 
 The repository appends solved finite positions when their contributing range
 timestamps change. Republishing UI state or receiving unrelated IMU updates
-does not manufacture trail points. Each tag retains at most 128 points and
-120 seconds; at most 64 tag histories are retained. Histories clear on map
+does not manufacture trail points. Each tag retains at most 2,400 points and
+120 seconds; at most 64 tag histories are retained. When the point bound is
+reached, the live preview is thinned while preserving the oldest/latest points
+and segment breaks; every raw new point still reaches automatic saved history.
+Histories clear on map
 configuration changes so moved anchors do not leave trails in old coordinates.
 
 A failed device poll, invalid/missing solved position, device uptime reset, or
@@ -102,6 +105,12 @@ gap over 2.5 seconds starts a new segment. Invalid range observations are remove
 and break the affected tag's line. Old points can remain visible, but are not
 connected to the returning tag across that gap. History expires even when no
 new positions arrive.
+
+Settings > Appearance > Localization map > Trail disappears after selects
+5 seconds, 10 seconds, 30 seconds, 1 minute or 2 minutes (default). The preference
+is persisted. Both live maps filter each point by age and recheck every 500 ms,
+so trails disappear even while telemetry is paused. This display filter does
+not affect automatic one-month path recording or the saved-history map.
 
 Both dashboard and fullscreen pass the same histories into `LocalizationMap`.
 Paths and markers call the same `screen()`/`MapProjection`, including Y reversal,
@@ -126,7 +135,7 @@ instead of Android's JVM JSON stubs.
   sequence gaps, paused UWB with arriving IMU, reboot, storage limit and corrupt
   session errors.
 - `TagTrailStoreTest`: single/multiple tags, duplicate measurement evidence,
-  128-point policy via a smaller injected bound, expiry, invalid/missing
+  bounded point retention via a smaller injected bound, expiry, invalid/missing
   positions, explicit reconnect and elapsed gaps. A known three-anchor solution
   (1 m, 2 m) projects identically for marker/trail at dashboard/fullscreen sizes,
   three zoom levels, and nonzero pan.
@@ -146,4 +155,28 @@ Final command results, CSV counts, logs and rollback patch are stored with
 
 ## Requested CSV order and direct console output
 
-The current export supersedes earlier column layouts: see `CSV_FORMAT.md` for the exact 44-column header. CIR fields use their plain names except `cir_preamble_count`, which distinguishes the second preamble count. Battery voltage (`battery_voltage`, volts) and movement speed (`speed_mps`, meters/second) follow battery percent. No additional metadata columns are appended. Original private captures remain unchanged. The terminal uses direct `printf`, one header per boot and CSV rows; routine waiting/IMU/battery/range logs are removed.
+The default full export supersedes earlier column layouts: see `CSV_FORMAT.md` for the exact 44-column header. CIR fields use their plain names except `cir_preamble_count`, which distinguishes the second preamble count. Battery voltage (`battery_voltage`, volts) and movement speed (`speed_mps`, meters/second) follow battery percent. No additional metadata columns are appended. Original private captures remain unchanged. The terminal uses direct `printf`, one header per boot and CSV rows; routine waiting/IMU/battery/range logs are removed.
+
+
+## Custom CSV fields
+
+Settings > Files > CSV fields now has four mandatory device-detail fields
+(timestamp, MAC, IP and role) and exactly three optional checkboxes: IMU, Battery
+(percentage and voltage), and UWB (ranging, raw CIR and movement speed).
+Changes save automatically and apply directly to Stop CSV and Settings > Files >
+Export all stored data. The dashboard footer no longer has an export button;
+retained recordings remain exportable in Files using the same stop/freeze flow.
+First install enables all groups for the original 44 columns. All groups off
+exports the four mandatory columns. Legacy partial choices enable their whole
+group; mandatory fields are restored even if the saved preference omitted them.
+The shared export validation always adds mandatory columns and rejects unknown
+fields before writing. Column order, numeric precision, units, timestamps, full
+selected I/Q arrays, UTF-8 BOM and CRLF remain unchanged.
+
+Column selection is a presentation/export choice: ingestion, CIR acquisition,
+recording scope, pause behavior, raw private records and automatic path history
+are kept. Missing values still export as zero, and selected raw I/Q retains all
+samples. No row filtering, resampling, new columns or firmware changes are added.
+The last selection is stored as `csv_export_fields`. Pending row bounds and
+field choices survive Android's save-document/activity recreation path; changing
+selection later cannot widen an already-frozen export range.

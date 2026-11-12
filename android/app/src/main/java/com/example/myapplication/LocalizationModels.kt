@@ -40,7 +40,9 @@ data class DashboardSnapshot(
     val pathRecording: Boolean = false,
     val pathPointCount: Int = 0,
     val pathError: String = ""
-)
+) {
+    val allDevicesOffline: Boolean get() = devices.none { states[it.key]?.online == true }
+}
 
 fun normalizeMac(value: String): String = value.trim().replace("-", ":").uppercase()
     .takeIf { Regex("^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$").matches(it) }.orEmpty()

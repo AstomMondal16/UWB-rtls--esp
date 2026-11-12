@@ -2,9 +2,26 @@ package com.example.myapplication
 
 data class TrailPoint(val x: Double, val y: Double, val receivedAtMs: Long, val startsSegment: Boolean)
 
+internal const val DEFAULT_LIVE_TRAIL_SECONDS = 120
+internal val LIVE_TRAIL_DURATIONS: Map<Int, String> = linkedMapOf(
+    5 to "5 seconds", 10 to "10 seconds", 30 to "30 seconds", 60 to "1 minute", 120 to "2 minutes")
+
+internal fun validTrailDuration(seconds: Int): Int =
+    seconds.takeIf { it in LIVE_TRAIL_DURATIONS } ?: DEFAULT_LIVE_TRAIL_SECONDS
+
+/** Display filtering never changes the receiver-owned history or the saved path recorder. */
+internal fun trailsWithinDuration(trails: Map<String, List<TrailPoint>>, now: Long,
+    seconds: Int): Map<String, List<TrailPoint>> {
+    val ageLimit = validTrailDuration(seconds) * 1000L
+    return trails.mapValues { (_, points) -> points.filter { now - it.receivedAtMs in 0 until ageLimit } }
+        .filterValues { it.isNotEmpty() }
+}
+
 /** Receiver-owned histories; no interpolation across missing measurements. */
-internal class TagTrailStore(private val maxPoints: Int = 128, private val maxAgeMs: Long = 120_000,
+internal class TagTrailStore(private val maxPoints: Int = DEFAULT_LIVE_TRAIL_SECONDS * SamplingRate.MAX_HZ,
+                             private val maxAgeMs: Long = DEFAULT_LIVE_TRAIL_SECONDS * 1000L,
                              private val gapMs: Long = 2500) {
+    init { require(maxPoints >= 2) }
     private data class History(val points: ArrayDeque<TrailPoint> = ArrayDeque(),
                                var evidence: String = "", var broken: Boolean = true)
     private val histories = linkedMapOf<String, History>()
@@ -24,7 +41,25 @@ internal class TagTrailStore(private val maxPoints: Int = 128, private val maxAg
             h.points.addLast(point)
             added[tag] = point
             h.evidence = token; h.broken = false
-            while (h.points.size > maxPoints) h.points.removeFirst()
+            if (h.points.size > maxPoints) {
+                // Thin the live preview, preserving its time span and gaps; added keeps the raw new point.
+                val preview = ArrayDeque<TrailPoint>()
+                val firstStamp = h.points.minOf { it.receivedAtMs }
+                val span = (h.points.maxOf { it.receivedAtMs } - firstStamp).coerceAtLeast(1)
+                val bucketWidth = span / (maxPoints / 2) + 1
+                var lastBucket = -1L
+                var segmentStart = false
+                h.points.forEachIndexed { index, point ->
+                    segmentStart = segmentStart || point.startsSegment
+                    val bucket = maxOf(lastBucket, (point.receivedAtMs - firstStamp) / bucketWidth)
+                    if (index == 0 || bucket != lastBucket || index == h.points.lastIndex) {
+                        preview.addLast(point.copy(startsSegment = segmentStart))
+                        segmentStart = false
+                        lastBucket = bucket
+                    }
+                }
+                h.points.clear(); h.points.addAll(preview)
+            }
         }
         prune(now)
         while (histories.size > 64) histories.remove(histories.keys.first())

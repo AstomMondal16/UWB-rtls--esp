@@ -3,6 +3,9 @@ package com.example.myapplication
 import android.Manifest
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.key
@@ -45,9 +48,15 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateOffsetAsState
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -116,6 +125,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -135,6 +147,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -182,6 +196,10 @@ import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import androidx.lifecycle.lifecycleScope
 import org.json.JSONObject
 import java.security.KeyStore
 import java.time.LocalDateTime
@@ -214,6 +232,7 @@ private data class DashboardPreferences(
     val fontSize: String = "Medium",
     val dashboardContainers: Boolean = true,
     val monitorTabs: Boolean = true,
+    val trailDurationSeconds: Int = DEFAULT_LIVE_TRAIL_SECONDS,
     val reduceAnimations: Boolean = false,
     val confirmCalibration: Boolean = true,
     val rememberLastDevice: Boolean = true
@@ -234,6 +253,13 @@ private data class SavedCsvFile(val uri: Uri, val filename: String, val records:
 
 class MainActivity : ComponentActivity() {
     private lateinit var repository: DeviceRepository
+    private val repositoryReady = mutableStateOf(false)
+    private val startupError = mutableStateOf("")
+    private var startupJob: Job? = null
+    private var pendingStartupStatus: String? = null
+    private var pendingNetworkResult: Boolean? = null
+    private var pendingCsvResult = false
+    private var pendingCsvDestination: Uri? = null
     private val dashboard = mutableStateOf(DashboardSnapshot())
     private val uiPreferences = mutableStateOf(DashboardPreferences())
     private val csvFolder = mutableStateOf<Uri?>(null)
@@ -241,10 +267,12 @@ class MainActivity : ComponentActivity() {
     private var pendingCsvFilename = "UWB_session.csv"
     private var pendingCsvStartCount = 0
     private var pendingCsvEndCount = 0
+    private var pendingCsvFields: List<String> = CsvSessionStore.SENSOR_FIELDS
+    private val csvExportFields = mutableStateOf(CsvSessionStore.SENSOR_FIELDS)
     private val createCsv = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri: Uri? ->
-        if (uri == null) {
-            repository.setStatus("CSV export cancelled")
-        } else saveCsvToUri(uri, pendingCsvStartCount, pendingCsvEndCount)
+        pendingCsvResult = true
+        pendingCsvDestination = uri
+        finishPendingCsvExport()
     }
 
     private val chooseCsvFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -253,12 +281,11 @@ class MainActivity : ComponentActivity() {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             csvFolder.value = uri
             getSharedPreferences("dashboard_settings", MODE_PRIVATE).edit().putString("csv_folder", uri.toString()).apply()
-            repository.setStatus("CSV export folder saved")
-        }.onFailure { repository.setStatus("Could not use this folder: ${it.message}") }
+            reportStartupStatus("CSV export folder saved")
+        }.onFailure { reportStartupStatus("Could not use this folder: ${it.message}") }
     }
     private val localNetworkPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) repository.manualScan()
-        else repository.setStatus("Allow local network access to discover and connect to UWB devices")
+        if (repositoryReady.value) handleNetworkPermission(granted) else pendingNetworkResult = granted
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -272,20 +299,23 @@ class MainActivity : ComponentActivity() {
                     state.getInt("csv_saved_records"))
             }
         }
-        repository = DeviceRepository(this) { dashboard.value = it }
-        dashboard.value = repository.snapshot()
+        pendingCsvResult = savedInstanceState?.getBoolean("csv_destination_received") ?: false
+        pendingCsvDestination = savedInstanceState?.getString("csv_pending_destination")?.let(Uri::parse)
         val settings = getSharedPreferences("dashboard_settings", MODE_PRIVATE)
+        csvExportFields.value = CsvSessionStore.restoredExportFields(settings.getStringSet("csv_export_fields", null))
+        pendingCsvFields = CsvSessionStore.restoredExportFields(
+            savedInstanceState?.getStringArrayList("csv_pending_fields") ?: csvExportFields.value)
         uiPreferences.value = DashboardPreferences(
             theme = settings.getString("theme", "System") ?: "System",
             deviceColors = settings.getBoolean("device_colors", false),
             fontSize = settings.getString("font_size", "Medium") ?: "Medium",
             dashboardContainers = settings.getBoolean("dashboard_containers", true),
             monitorTabs = settings.getBoolean("monitor_tabs", true),
+            trailDurationSeconds = validTrailDuration(settings.getInt("trail_duration_seconds", DEFAULT_LIVE_TRAIL_SECONDS)),
             reduceAnimations = settings.getBoolean("reduce_animations", false),
             confirmCalibration = settings.getBoolean("confirm_calibration", true),
             rememberLastDevice = settings.getBoolean("remember_device", true))
         csvFolder.value = settings.getString("csv_folder", null)?.let(Uri::parse)
-        requestLocalNetworkIfNeeded()
         setContent {
             val snapshot by remember { dashboard }
             val preferences by remember { uiPreferences }
@@ -302,16 +332,26 @@ class MainActivity : ComponentActivity() {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, density.fontScale * preferences.fontScale)) {
                 MyApplicationTheme(darkTheme, deviceColors = preferences.deviceColors) {
-                    var showSplash by remember { mutableStateOf(!preferences.reduceAnimations) }
+                    var logoFinished by remember { mutableStateOf(preferences.reduceAnimations || savedInstanceState != null) }
+                    var dashboardPrepared by remember { mutableStateOf(false) }
                     LaunchedEffect(preferences.reduceAnimations) {
-                        if (preferences.reduceAnimations) showSplash = false
-                        else if (showSplash) { delay(1550); showSplash = false }
+                        if (!logoFinished && !preferences.reduceAnimations) delay(650)
+                        logoFinished = true
                     }
-                    Crossfade(targetState = showSplash,
-                        animationSpec = tween(if (preferences.reduceAnimations) 0 else 350), label = "startup") { splash ->
-                        if (splash) SenseSplash() else DashboardApp(snapshot, repository,
+                    LaunchedEffect(repositoryReady.value) {
+                        if (repositoryReady.value) {
+                            // Let the dashboard draw before fading its cover.
+                            withFrameNanos { }
+                            withFrameNanos { }
+                            dashboardPrepared = true
+                        }
+                    }
+                    Box(Modifier.fillMaxSize()) {
+                        if (repositoryReady.value) DashboardApp(snapshot, repository,
                             preferences = preferences,
                             storageFolder = folder,
+                            csvFields = csvExportFields.value,
+                            onCsvFieldsChanged = ::setCsvExportFields,
                             savedCsvFile = savedCsv.value,
                             onDismissSavedCsv = { savedCsv.value = null },
                             onViewSavedCsv = ::openSavedCsv,
@@ -322,6 +362,7 @@ class MainActivity : ComponentActivity() {
                                     .putBoolean("device_colors", changed.deviceColors)
                                     .putBoolean("dashboard_containers", changed.dashboardContainers)
                                     .putBoolean("monitor_tabs", changed.monitorTabs)
+                                    .putInt("trail_duration_seconds", changed.trailDurationSeconds)
                                     .putBoolean("reduce_animations", changed.reduceAnimations)
                                     .putBoolean("confirm_calibration", changed.confirmCalibration)
                                     .putBoolean("remember_device", changed.rememberLastDevice).apply()
@@ -336,16 +377,79 @@ class MainActivity : ComponentActivity() {
                             onOpenStorage = { openStorageFolder(folder) },
                             onSaveCsv = ::requestCsvExport,
                             onScan = { if (requestLocalNetworkIfNeeded()) repository.manualScan() })
+                        AnimatedVisibility(visible = !dashboardPrepared || !logoFinished,
+                            enter = EnterTransition.None,
+                            exit = fadeOut(tween(if (preferences.reduceAnimations) 0 else 160)),
+                            modifier = Modifier.fillMaxSize()) {
+                            if (startupError.value.isBlank()) SenseSplash(animate = !preferences.reduceAnimations)
+                            else Surface(Modifier.fillMaxSize(), color = Page) {
+                                Column(Modifier.fillMaxSize().padding(24.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+                                    horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("Could not open saved data", style = MaterialTheme.typography.titleLarge)
+                                    Text(startupError.value, color = Muted)
+                                    Button(onClick = ::loadRepository) { Text("Retry") }
+                                }
+                            }
+                        }
                     }
-                }
                 }
             }
         }
+        loadRepository()
+    }
+
+    private fun loadRepository() {
+        if (startupJob?.isActive == true || repositoryReady.value) return
+        startupError.value = ""
+        startupJob = lifecycleScope.launch {
+            val loaded = try {
+                loadStartupResource(
+                    load = { DeviceRepository(applicationContext) { dashboard.value = it } },
+                    release = { it.close() })
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                startupError.value = error.message ?: "Please try again."
+                return@launch
+            }
+            repository = loaded
+            dashboard.value = loaded.snapshot()
+            repositoryReady.value = true
+            pendingStartupStatus?.let(loaded::setStatus)
+            pendingStartupStatus = null
+            finishPendingCsvExport()
+            val permission = pendingNetworkResult
+            pendingNetworkResult = null
+            if (permission == null) requestLocalNetworkIfNeeded() else handleNetworkPermission(permission)
+        }
+    }
+
+    private fun reportStartupStatus(message: String) {
+        if (repositoryReady.value) repository.setStatus(message) else pendingStartupStatus = message
+    }
+
+    private fun handleNetworkPermission(granted: Boolean) {
+        if (granted) repository.manualScan()
+        else repository.setStatus("Allow local network access to discover and connect to UWB devices")
+    }
+
+    private fun finishPendingCsvExport() {
+        if (!repositoryReady.value || !pendingCsvResult) return
+        val uri = pendingCsvDestination
+        pendingCsvResult = false
+        pendingCsvDestination = null
+        if (uri == null) repository.setStatus("CSV export cancelled")
+        else saveCsvToUri(uri, pendingCsvStartCount, pendingCsvEndCount)
+    }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt("csv_export_start", pendingCsvStartCount)
         outState.putInt("csv_export_end", pendingCsvEndCount)
         outState.putString("csv_export_filename", pendingCsvFilename)
+        outState.putStringArrayList("csv_pending_fields", ArrayList(pendingCsvFields))
+        outState.putBoolean("csv_destination_received", pendingCsvResult)
+        pendingCsvDestination?.let { outState.putString("csv_pending_destination", it.toString()) }
         savedCsv.value?.let { file ->
             outState.putString("csv_saved_uri", file.uri.toString())
             outState.putString("csv_saved_filename", file.filename)
@@ -354,7 +458,15 @@ class MainActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
     }
 
+    private fun setCsvExportFields(fields: List<String>) {
+        val selected = CsvSessionStore.restoredExportFields(fields)
+        csvExportFields.value = selected
+        getSharedPreferences("dashboard_settings", MODE_PRIVATE).edit()
+            .putStringSet("csv_export_fields", selected.toSet()).apply()
+    }
+
     private fun requestCsvExport(label: String, startingAtRecord: Int, endingAtRecord: Int) {
+        pendingCsvFields = CsvSessionStore.orderedExportFields(csvExportFields.value)
         val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", Locale.US))
         val cleanLabel = label.replace(Regex("[^A-Za-z0-9_-]"), "_").trim('_').ifBlank { "session" }
         val filename = "UWB_${cleanLabel}_$stamp.csv"
@@ -386,7 +498,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (output == null) { repository.setStatus("Selected file returned no writable stream"); return }
-        repository.exportCsv(output, startingAtRecord, endingAtRecord) { result ->
+        repository.exportCsv(output, startingAtRecord, endingAtRecord, pendingCsvFields.toList()) { result ->
             result.onSuccess { summary ->
                 val filename = runCatching {
                     contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -435,8 +547,10 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun NavigationGlyph(index: Int, selected: Boolean, reduceAnimations: Boolean) {
     val scale by animateFloatAsState(if (selected) 1.08f else 1f,
-        animationSpec = tween(if (reduceAnimations) 0 else 180), label = "navigation-icon")
-    InstrumentIcon(listOf("monitor", "devices", "settings")[index], if (selected) Accent else Muted,
+        animationSpec = tween(if (reduceAnimations) 0 else 200, easing = FastOutSlowInEasing), label = "navigation-icon")
+    val tint by animateColorAsState(if (selected) Accent else Muted,
+        animationSpec = tween(if (reduceAnimations) 0 else 200), label = "navigation-icon-color")
+    InstrumentIcon(listOf("monitor", "devices", "settings")[index], tint,
         Modifier.size(24.dp).graphicsLayer { scaleX = scale; scaleY = scale })
 }
 
@@ -463,7 +577,7 @@ private fun AppNavigation(selected: Int, rail: Boolean, reduceAnimations: Boolea
             .onGloballyPositioned { origin = it.positionInRoot() }) {
             centers[selected]?.let { target ->
                 val center by animateOffsetAsState(target - origin,
-                    animationSpec = tween(if (reduceAnimations) 0 else 300), label = "navigation-indicator")
+                    animationSpec = tween(if (reduceAnimations) 0 else 220, easing = FastOutSlowInEasing), label = "navigation-indicator")
                 Canvas(Modifier.matchParentSize()) {
                     val width = 64.dp.toPx()
                     val height = 32.dp.toPx()
@@ -494,14 +608,31 @@ private fun AppNavigation(selected: Int, rail: Boolean, reduceAnimations: Boolea
 @Composable
 private fun TabTransition(targetState: Int, reduceAnimations: Boolean, modifier: Modifier = Modifier,
                           label: String, fullSlide: Boolean = false, content: @Composable (Int) -> Unit) {
-    AnimatedContent(targetState = targetState, modifier = modifier, label = label,
+    val layoutDirection = LocalLayoutDirection.current
+    AnimatedContent(targetState = targetState, modifier = modifier.clipToBounds(), label = label,
         transitionSpec = {
-            val duration = if (reduceAnimations) 0 else if (fullSlide) 300 else 240
-            val direction = if (targetState > initialState) 1 else -1
-            ((slideInHorizontally(tween(duration)) { direction * it / if (fullSlide) 1 else 12 } + fadeIn(tween(duration))) togetherWith
-                (slideOutHorizontally(tween(duration)) { -direction * it / if (fullSlide) 1 else 16 } + fadeOut(tween(duration*2/3))))
-                .using(SizeTransform(clip = true) { _, _ -> tween(duration) })
+            val duration = if (reduceAnimations) 0 else if (fullSlide) 220 else 180
+            val fadeDelay = if (reduceAnimations) 0 else 20
+            val direction = (if (targetState > initialState) 1 else -1) *
+                (if (layoutDirection == LayoutDirection.Rtl) -1 else 1)
+            ((slideInHorizontally(tween(duration, easing = FastOutSlowInEasing)) {
+                direction * it / if (fullSlide) 4 else 10
+            } + fadeIn(tween(duration - fadeDelay, delayMillis = fadeDelay))) togetherWith
+                (slideOutHorizontally(tween(duration, easing = FastOutSlowInEasing)) {
+                    -direction * it / if (fullSlide) 6 else 12
+                } + fadeOut(tween(if (reduceAnimations) 0 else 90))))
+                .using(SizeTransform(clip = true) { _, _ -> tween(duration, easing = FastOutSlowInEasing) })
         }) { visibleState -> content(visibleState) }
+}
+
+@Composable
+private fun ExpandableSection(visible: Boolean, reduceAnimations: Boolean, content: @Composable ColumnScope.() -> Unit) {
+    val duration = if (reduceAnimations) 0 else 180
+    AnimatedVisibility(visible = visible,
+        enter = expandVertically(tween(duration, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) + fadeIn(tween(duration)),
+        exit = shrinkVertically(tween(duration, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top) + fadeOut(tween(duration / 2))) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -511,6 +642,8 @@ private fun DashboardApp(
     repo: DeviceRepository,
     preferences: DashboardPreferences,
     storageFolder: Uri?,
+    csvFields: List<String>,
+    onCsvFieldsChanged: (List<String>) -> Unit,
     savedCsvFile: SavedCsvFile?,
     onDismissSavedCsv: () -> Unit,
     onViewSavedCsv: (Uri) -> String?,
@@ -588,6 +721,7 @@ private fun DashboardApp(
         }
     }.orEmpty()
     val sample = chosen?.let { snapshot.states[it.key]?.sample }
+    val mapOnly = snapshot.allDevicesOffline
     val tracking = snapshot.states.values.any { it.online && it.sample.optBoolean("streaming", false) }
     var clockMs by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(snapshot.collecting) {
@@ -695,7 +829,12 @@ private fun DashboardApp(
                     page = settingsTab, onPageSelected = { navigationFocus.clearFocus(); settingsTab = it },
                     snapshot = snapshot, names = names, chosen = chosen, chosenIp = chosenIp, sample = sample, cirData = cirData,
                     preferences = preferences, storageFolder = storageFolder, onPreferencesChanged = onPreferencesChanged,
+                    csvFields = csvFields, onCsvFieldsChanged = onCsvFieldsChanged,
                     onPickStorage = onPickStorage, onResetStorage = onResetStorage, onOpenStorage = onOpenStorage,
+                    onExportAll = {
+                        repo.setCollecting(false)
+                        onSaveCsv("session", 0, repo.snapshot().collected)
+                    },
                     onRefresh = repo::refreshNow,
                     onDeviceSelected = { selectedKey = it },
                     onApplyDevice = { device, body, completed ->
@@ -785,7 +924,7 @@ private fun DashboardApp(
                                 snapshot.calibrationProgress, snapshot.streamingPending)
                             FeedbackMessage(feedback.message, busy = feedback.busy, details = feedback.details)
                         }
-                        if (preferences.monitorTabs) stickyHeader(key = "monitor-tabs") {
+                        if (preferences.monitorTabs && !mapOnly) stickyHeader(key = "monitor-tabs") {
                             SecondaryTabRow(selectedTabIndex = monitorTab, containerColor = Page) {
                                 listOf("Map", "Motion", "CIR", "Battery").forEachIndexed { index, title ->
                                     Tab(selected = monitorTab == index, onClick = { monitorTab = index },
@@ -796,7 +935,7 @@ private fun DashboardApp(
                         }
                         item {
                             DashboardGroup(preferences.dashboardContainers) {
-                                TabTransition(targetState = if (preferences.monitorTabs) monitorTab else -1,
+                                TabTransition(targetState = if (mapOnly) 0 else if (preferences.monitorTabs) monitorTab else -1,
                                     modifier = Modifier.fillMaxWidth(), reduceAnimations = preferences.reduceAnimations,
                                     label = "dashboard-view") { activeTab ->
                                     Column {
@@ -817,81 +956,80 @@ private fun DashboardApp(
                                                         }) { InstrumentIcon("fullscreen", Muted) }
                                                     }
                                                 }) {
-                                                    if (snapshot.devices.none { it.role == "anchor" }) {
-                                                        EmptyHint("Add at least three anchors in Devices and enter their measured coordinates to locate a tag.")
-                                                    } else {
-                                                        LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, snapshot.trails, fitMapRequest,
-                                                            Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(16.dp)), viewport = mapViewport)
-                                                        MapLegend()
+                                                    Box(Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(16.dp)),
+                                                        contentAlignment = Alignment.Center) {
+                                                        if (snapshot.devices.none { it.role == "anchor" }) {
+                                                            EmptyHint("Add at least three anchors in Devices and enter their measured coordinates to locate a tag.")
+                                                        } else LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, snapshot.trails, fitMapRequest,
+                                                            Modifier.fillMaxSize(), viewport = mapViewport, trailDurationSeconds = preferences.trailDurationSeconds)
                                                     }
-                                                    snapshot.positions.entries.firstOrNull()?.let { (tag, p) ->
-                                                        Text("${names[tag] ?: "Tag"}   X ${String.format(Locale.US, "%+.2f", p.x)} m   Y ${String.format(Locale.US, "%+.2f", p.y)} m   RMS ${p.error.fmt()} m",
-                                                            color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
-                                                    }
+                                                    MapLegend()
+                                                    val position = snapshot.positions.entries.firstOrNull()
+                                                    Text(position?.let { (tag, p) ->
+                                                        "${names[tag] ?: "Tag"}   X ${String.format(Locale.US, "%+.2f", p.x)} m   Y ${String.format(Locale.US, "%+.2f", p.y)} m   RMS ${p.error.fmt()} m"
+                                                    } ?: "Waiting for a valid tag position", color = Ink,
+                                                        fontWeight = FontWeight.SemiBold, fontSize = 12.sp, minLines = 2, maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                                                 }
                                                 1 -> GroupedSection("IMU \u00b7 ${chosen?.let { names[it.key] } ?: "No device"}") {
-                                                    when {
-                                                        chosen == null -> EmptyHint("Add or select a device to view IMU telemetry.")
-                                                        sample == null -> EmptyHint("Waiting for telemetry from ${names[chosen.key]}. Check that it is online.")
-                                                        snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline. Reconnect it to Wi-Fi to receive IMU telemetry.")
-                                                        !sample.optBoolean("imu_valid") -> EmptyHint(
-                                                            if (!sample.optBoolean("imu_enabled", true))
-                                                                "IMU is disabled in this device's firmware. Enable the MPU6050 and flash the device."
-                                                            else "Waiting for a valid MPU6050 sample. Check sensor wiring and the device boot log.")
-                                                        else -> {
-                                                            OrientationView(orientationEstimate, orientationZero)
-                                                            TextButton(onClick = { showRawImu = !showRawImu }) {
-                                                                Text(if (showRawImu) "Hide raw IMU readings" else "Show raw IMU readings")
+                                                    val scrollState = rememberScrollState()
+                                                    Column(Modifier.fillMaxWidth().height(600.dp).clipToBounds()
+                                                        .verticalScroll(scrollState)) {
+                                                        when {
+                                                            chosen == null -> EmptyHint("Add or select a device to view IMU telemetry.")
+                                                            sample == null -> EmptyHint("Waiting for telemetry from ${names[chosen.key]}. Check that it is online.")
+                                                            snapshot.states[chosen.key]?.online != true -> EmptyHint("${names[chosen.key]} is offline. Reconnect it to Wi-Fi to receive IMU telemetry.")
+                                                            !sample.optBoolean("imu_valid") -> EmptyHint(
+                                                                if (!sample.optBoolean("imu_enabled", true))
+                                                                    "IMU is disabled in this device's firmware. Enable the MPU6050 and flash the device."
+                                                                else "Waiting for a valid MPU6050 sample. Check sensor wiring and the device boot log.")
+                                                            else -> {
+                                                                OrientationView(orientationEstimate, orientationZero)
+                                                                TextButton(onClick = { showRawImu = !showRawImu }) {
+                                                                    Text(if (showRawImu) "Hide raw IMU readings" else "Show raw IMU readings")
+                                                                }
+                                                                ExpandableSection(showRawImu, preferences.reduceAnimations) {
+                                                                    ImuReadings(sample)
+                                                                }
+                                                                ImuChart("Accelerometer \u00b7 g", imuHistory, acceleration = true,
+                                                                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                                                                ImuChart("Gyroscope \u00b7 deg/s", imuHistory, acceleration = false,
+                                                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                                                             }
-                                                            if (showRawImu) ImuReadings(sample)
-                                                            ImuChart("Accelerometer \u00b7 g", imuHistory, acceleration = true,
-                                                                modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
-                                                            ImuChart("Gyroscope \u00b7 deg/s", imuHistory, acceleration = false,
-                                                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                                                         }
                                                     }
                                                 }
-                                                2 -> GroupedSection("Channel impulse response") {
-                                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                                        Text(chosen?.let { "${names[it.key] ?: "Device"} | ${it.mac.ifBlank { it.ip }}" } ?: "Select a device",
-                                                            color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                                                        TextButton(enabled = chosen != null && chosenIp.isNotBlank(), onClick = {
-                                                            if (chosen == null || chosenIp.isBlank()) cirError = "This device has no IP address"
-                                                            else if (!cirLoading) {
-                                                                cirError = "Loading CIR..."
-                                                                cirDeviceKey = chosen.key
-                                                                requestCir(chosen.key, chosenIp)
-                                                            }
-                                                        }) { Text("Refresh") }
-                                                    }
-                                                    val activeCir = cirData.takeIf { cirDeviceKey == chosen?.key }
-                                                    if (activeCir?.optBoolean("valid") == true) {
-                                                        if (cirError.isNotBlank() && cirError != "Loading CIR...") FeedbackMessage(cirError)
-                                                        if (chosen != null && snapshot.states[chosen.key]?.online != true)
-                                                            Text("Device offline - showing the last cached CIR capture", color = Warning, fontSize = 14.sp)
-                                                        CirPlot(activeCir, cirHistory, Modifier.fillMaxWidth().height(260.dp))
-                                                        Text("${activeCir.optInt("sample_count")} samples | seq ${activeCir.optLong("sequence")} | age ${activeCir.optLong("age_ms")} ms",
-                                                            color = Muted, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
-                                                    } else EmptyHint(cirError.ifBlank {
-                                                        when {
-                                                            activeCir?.optBoolean("enabled") == false -> "CIR is disabled in this device's firmware."
-                                                            activeCir != null -> "CIR is enabled; waiting for a UWB packet from another device."
-                                                            else -> "Waiting for automatic CIR updates from the selected device."
+                                                2 -> CirPanel(
+                                                    data = cirData.takeIf { cirDeviceKey == chosen?.key },
+                                                    history = cirHistory,
+                                                    deviceLabel = chosen?.let { "${names[it.key] ?: "Device"} | ${it.mac.ifBlank { it.ip }}" } ?: "Select a device",
+                                                    offline = chosen != null && snapshot.states[chosen.key]?.online != true,
+                                                    error = cirError,
+                                                    refreshEnabled = chosen != null && chosenIp.isNotBlank(),
+                                                    onRefresh = {
+                                                        if (chosen == null || chosenIp.isBlank()) cirError = "This device has no IP address"
+                                                        else if (!cirLoading) {
+                                                            cirError = "Loading CIR..."
+                                                            cirDeviceKey = chosen.key
+                                                            requestCir(chosen.key, chosenIp)
                                                         }
                                                     })
-                                                }
                                                 3 -> GroupedSection("Battery") {
-                                                    when {
-                                                        chosen == null -> BatteryInfoState("Select a device to view battery telemetry.")
-                                                        sample == null -> BatteryInfoState("Waiting for ${names[chosen.key]} battery telemetry.")
-                                                        snapshot.states[chosen.key]?.online != true -> BatteryInfoState("${names[chosen.key]} is offline.")
-                                                        !sample.optBoolean("battery_valid") -> BatteryInfoState(
-                                                            "Battery reading unavailable. Check the firmware battery monitor and ADC wiring.", warning = true)
-                                                        !sample.optDouble("battery_percent", Double.NaN).isFinite() ||
-                                                            !sample.optDouble("battery_voltage", Double.NaN).isFinite() -> BatteryInfoState(
-                                                            "The device sent an invalid battery value.", warning = true)
-                                                        else -> BatteryTelemetryCard(sample.optDouble("battery_percent").coerceIn(0.0, 100.0),
-                                                            sample.optDouble("battery_voltage"), preferences.reduceAnimations)
+                                                    val scrollState = rememberScrollState()
+                                                    Column(Modifier.fillMaxWidth().height(144.dp).clipToBounds()
+                                                        .verticalScroll(scrollState)) {
+                                                        when {
+                                                            chosen == null -> BatteryInfoState("Select a device to view battery telemetry.")
+                                                            sample == null -> BatteryInfoState("Waiting for ${names[chosen.key]} battery telemetry.")
+                                                            snapshot.states[chosen.key]?.online != true -> BatteryInfoState("${names[chosen.key]} is offline.")
+                                                            !sample.optBoolean("battery_valid") -> BatteryInfoState(
+                                                                "Battery reading unavailable. Check the firmware battery monitor and ADC wiring.", warning = true)
+                                                            !sample.optDouble("battery_percent", Double.NaN).isFinite() ||
+                                                                !sample.optDouble("battery_voltage", Double.NaN).isFinite() -> BatteryInfoState(
+                                                                "The device sent an invalid battery value.", warning = true)
+                                                            else -> BatteryTelemetryCard(sample.optDouble("battery_percent").coerceIn(0.0, 100.0),
+                                                                sample.optDouble("battery_voltage"), preferences.reduceAnimations)
+                                                        }
                                                     }
                                                 }
                                             }
@@ -901,14 +1039,9 @@ private fun DashboardApp(
                             }
                         }
                         item {
-                            Row(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("${snapshot.devices.size} configured · ${snapshot.discovered.size} discovered · ${snapshot.collected} stored records",
-                                    color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                                TextButton(enabled = snapshot.collected > 0 && !snapshot.status.startsWith("Exporting"), onClick = {
-                                    repo.setCollecting(false)
-                                    onSaveCsv("session", 0, repo.snapshot().collected)
-                                }) { Text("Export all", fontSize = 14.sp) }
-                            }
+                            Text("${snapshot.devices.size} configured \u00b7 ${snapshot.discovered.size} discovered \u00b7 ${snapshot.collected} stored records",
+                                color = Muted, fontSize = 14.sp,
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp))
                         }
                     }
                 }
@@ -936,7 +1069,8 @@ private fun DashboardApp(
                         EmptyHint("Add at least three anchors with measured coordinates in Devices to locate a tag.")
                     }
                 } else LocalizationMap(snapshot.devices, snapshot.positions, names, snapshot.states, snapshot.trails, fitMapRequest,
-                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)))
+                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)),
+                    trailDurationSeconds = preferences.trailDurationSeconds)
                 MapLegend()
                 Text("Pinch to zoom \u00b7 Drag to pan \u00b7 Double tap to fit", color = Muted, fontSize = 12.sp,
                     modifier = Modifier.padding(vertical = 8.dp))
@@ -980,6 +1114,42 @@ private fun DashboardApp(
         })
     }
 
+}
+
+
+@Composable
+private fun CsvFieldSelection(fields: List<String>, onChange: (List<String>) -> Unit) {
+    val selected = fields.toSet()
+    SettingsHeading("CSV fields", "Choose sensor data for CSV exports.")
+    SettingsGroup {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("Always included", style = MaterialTheme.typography.titleSmall)
+            Text("Timestamp, MAC, IP address and role", color = Muted,
+                style = MaterialTheme.typography.bodySmall)
+        }
+        Column {
+            CsvSessionStore.OPTIONAL_FIELD_GROUPS.forEach { (title, group) ->
+                val checked = group.all { it in selected }
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .toggleable(value = checked, role = Role.Checkbox, onValueChange = { enabled ->
+                        onChange((if (enabled) selected + group else selected - group.toSet()).toList())
+                    }), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = checked, onCheckedChange = null)
+                    Column(Modifier.weight(1f)) {
+                        Text(title, style = MaterialTheme.typography.bodyMedium)
+                        Text(when (title) {
+                            "IMU" -> "Acceleration and gyroscope"
+                            "Battery" -> "Percentage and voltage"
+                            else -> "Ranging, raw CIR I/Q and speed"
+                        }, color = Muted, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+    Text("Saved automatically for CSV exports. Recordings retain all fields.",
+        color = Muted, style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable
@@ -1125,8 +1295,10 @@ private fun ImuReadings(sample: JSONObject) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(Modifier.fillMaxWidth()) {
             Text("Axis", color = Muted, fontSize = 14.sp, modifier = Modifier.width(40.dp))
-            Text("Accel \u00b7 g", color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
-            Text("Gyro \u00b7 deg/s", color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+            Text("Accel \u00b7 g", color = Muted, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+            Text("Gyro \u00b7 deg/s", color = Muted, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
         }
         listOf("X", "Y", "Z").forEachIndexed { index, axis ->
             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
@@ -1135,6 +1307,7 @@ private fun ImuReadings(sample: JSONObject) {
                     val value = sample.optJSONArray(field)?.optDouble(index, Double.NaN) ?: Double.NaN
                     Text(if (value.isFinite()) String.format(Locale.US, "%.2f", value) else "--",
                         color = Ink, fontSize = 14.sp, fontFamily = FontFamily.Monospace,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
                 }
             }
@@ -1154,14 +1327,23 @@ private fun SettingsPage(
     cirData: JSONObject?,
     preferences: DashboardPreferences,
     storageFolder: Uri?,
+    csvFields: List<String>,
+    onCsvFieldsChanged: (List<String>) -> Unit,
     onPreferencesChanged: (DashboardPreferences) -> Unit,
     onPickStorage: () -> Unit,
     onResetStorage: () -> Unit,
     onOpenStorage: () -> Unit,
+    onExportAll: () -> Unit,
     onRefresh: () -> Unit,
     onDeviceSelected: (String) -> Unit,
     onApplyDevice: (DeviceRecord, JSONObject, (String) -> Unit) -> Unit
 ) {
+    val tabs = listOf("Appearance", "Files", "About", "Device")
+    val pagerState = rememberPagerState(initialPage = page) { tabs.size }
+    val scope = rememberCoroutineScope()
+    val focus = LocalFocusManager.current
+    LaunchedEffect(pagerState.settledPage) { onPageSelected(pagerState.settledPage) }
+    LaunchedEffect(pagerState.targetPage) { focus.clearFocus() }
     val context = LocalContext.current
     val folderPath = remember(storageFolder) { storageFolderPath(context, storageFolder) }
     Surface(Modifier.fillMaxSize(),
@@ -1174,26 +1356,37 @@ private fun SettingsPage(
                     Text("Make the app work your way", color = Muted, style = MaterialTheme.typography.bodyMedium)
                 }
             }
-            SecondaryScrollableTabRow(selectedTabIndex = page, edgePadding = 0.dp,
+            SecondaryScrollableTabRow(selectedTabIndex = pagerState.currentPage, edgePadding = 0.dp,
                 containerColor = MaterialTheme.colorScheme.surface) {
-                listOf("Appearance", "Files", "About", "Device").forEachIndexed { index, title ->
-                    Tab(selected = page == index, onClick = { onPageSelected(index) },
+                tabs.forEachIndexed { index, title ->
+                    Tab(selected = pagerState.currentPage == index, onClick = {
+                        focus.clearFocus()
+                        scope.launch {
+                            if (preferences.reduceAnimations) pagerState.scrollToPage(index)
+                            else pagerState.animateScrollToPage(index,
+                                animationSpec = tween(220, easing = FastOutSlowInEasing))
+                        }
+                    },
                         selectedContentColor = Accent, unselectedContentColor = Muted, text = {
                         Text(title, maxLines = 1, softWrap = false, fontSize = 14.sp)
                     })
                 }
             }
-            TabTransition(targetState = page, modifier = Modifier.weight(1f),
-                reduceAnimations = preferences.reduceAnimations, label = "settings-page") { visiblePage ->
+            HorizontalPager(state = pagerState, modifier = Modifier.weight(1f).fillMaxWidth(),
+                pageSpacing = 12.dp,
+                flingBehavior = PagerDefaults.flingBehavior(state = pagerState,
+                    snapAnimationSpec = tween(if (preferences.reduceAnimations) 0 else 220,
+                        easing = FastOutSlowInEasing))) { visiblePage ->
                 Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     when (visiblePage) {
                         0 -> PreferencesPage(preferences, onPreferencesChanged)
-                        1 -> StoragePage(storageFolder, folderPath,
-                            onPickStorage, onResetStorage, onOpenStorage)
+                        1 -> StoragePage(storageFolder, folderPath, csvFields, onCsvFieldsChanged,
+                            onPickStorage, onResetStorage, onOpenStorage,
+                            snapshot.collected, !snapshot.status.startsWith("Exporting"), onExportAll)
                         2 -> AboutPage(chosen)
                         else -> DevicePropertiesPage(snapshot, names, chosen, chosenIp, sample, cirData, onRefresh,
-                            onApplyDevice, onDeviceSelected)
+                            onApplyDevice, onDeviceSelected, preferences.reduceAnimations)
                     }
                 }
             }
@@ -1201,8 +1394,10 @@ private fun SettingsPage(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PreferencesPage(value: DashboardPreferences, onChange: (DashboardPreferences) -> Unit) {
+    var trailDurationExpanded by remember { mutableStateOf(false) }
     SettingsHeading("Appearance", "Changes are saved automatically.")
     SettingsGroup {
         Text("Theme", color = Ink, style = MaterialTheme.typography.titleSmall)
@@ -1228,6 +1423,28 @@ private fun PreferencesPage(value: DashboardPreferences, onChange: (DashboardPre
         PreferenceChoices(listOf("Containers", "No containers"), if (value.dashboardContainers) "Containers" else "No containers",
             preview = { ContainerPreview(withContainers = it == "Containers") }) {
             onChange(value.copy(dashboardContainers = it == "Containers"))
+        }
+    }
+    SettingsGroup {
+        Text("Localization map", color = Ink, style = MaterialTheme.typography.titleSmall)
+        Text("Trail disappears after", color = Ink, style = MaterialTheme.typography.titleSmall)
+        Text("Choose how long each point stays on the live maps. Saved path history keeps recording.", color = Muted, fontSize = 14.sp)
+        ExposedDropdownMenuBox(expanded = trailDurationExpanded,
+            onExpandedChange = { trailDurationExpanded = it }, modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(value = LIVE_TRAIL_DURATIONS.getValue(value.trailDurationSeconds),
+                onValueChange = {}, readOnly = true, singleLine = true,
+                shape = MaterialTheme.shapes.small,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = trailDurationExpanded) },
+                modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
+                    .fillMaxWidth().semantics { contentDescription = "Trail disappears after" })
+            ExposedDropdownMenu(expanded = trailDurationExpanded, onDismissRequest = { trailDurationExpanded = false }) {
+                LIVE_TRAIL_DURATIONS.forEach { (seconds, label) ->
+                    DropdownMenuItem(text = { Text(label) }, onClick = {
+                        onChange(value.copy(trailDurationSeconds = seconds))
+                        trailDurationExpanded = false
+                    })
+                }
+            }
         }
     }
     SettingsGroup {
@@ -1370,8 +1587,10 @@ private fun SettingsSwitch(title: String, detail: String, checked: Boolean, enab
 }
 
 @Composable
-private fun StoragePage(folder: Uri?, folderPath: String?,
-                       onBrowse: () -> Unit, onReset: () -> Unit, onOpen: () -> Unit) {
+private fun StoragePage(folder: Uri?, folderPath: String?, csvFields: List<String>,
+                       onCsvFieldsChanged: (List<String>) -> Unit,
+                       onBrowse: () -> Unit, onReset: () -> Unit, onOpen: () -> Unit,
+                       storedRecords: Int, exportEnabled: Boolean, onExportAll: () -> Unit) {
     SettingsHeading("CSV exports", "Keep your recorded measurements together.")
     SettingsGroup {
         Text("Save location", color = Ink, style = MaterialTheme.typography.titleSmall)
@@ -1380,6 +1599,15 @@ private fun StoragePage(folder: Uri?, folderPath: String?,
         OutlinedButton(onClick = onOpen, enabled = folder != null, modifier = Modifier.fillMaxWidth()) { InstrumentIcon("folder", LocalContentColor.current, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Open folder") }
         TextButton(onClick = onReset, enabled = folder != null) { Text("Ask every time instead") }
     }
+    CsvFieldSelection(csvFields, onCsvFieldsChanged)
+    OutlinedButton(onClick = onExportAll, enabled = storedRecords > 0 && exportEnabled,
+        modifier = Modifier.fillMaxWidth()) {
+        InstrumentIcon("export", LocalContentColor.current, Modifier.size(20.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("Export all stored data")
+    }
+    Text("$storedRecords stored records, including earlier sessions. Exporting stops an active recording.",
+        color = Muted, style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable
@@ -1407,7 +1635,8 @@ private fun DevicePropertiesPage(
     cir: JSONObject?,
     onRefresh: () -> Unit,
     onApply: (DeviceRecord, JSONObject, (String) -> Unit) -> Unit,
-    onDeviceSelected: (String) -> Unit
+    onDeviceSelected: (String) -> Unit,
+    reduceAnimations: Boolean
 ) {
     var role by remember(device?.key) { mutableStateOf(device?.role ?: "anchor") }
     var rate by remember(device?.key) { mutableStateOf(SamplingRate.textFromInterval(sample?.optInt("sensing_interval_ms") ?: 0)) }
@@ -1482,7 +1711,7 @@ private fun DevicePropertiesPage(
         TextButton(onClick = { showDiagnostics = !showDiagnostics }) {
             Text(if (showDiagnostics) "Hide diagnostics" else "Show diagnostics")
         }
-        if (showDiagnostics) {
+        ExpandableSection(showDiagnostics, reduceAnimations) {
             SettingsValue("Firmware version", sample?.optString("firmware_version")?.takeIf { it.isNotBlank() } ?: "Not reported by firmware")
             SettingsValue("Hardware version", sample?.optString("hardware_version")?.takeIf { it.isNotBlank() } ?: "Not reported by firmware")
             SettingsValue("BLE status", sample?.optString("ble_status")?.takeIf { it.isNotBlank() } ?: "Not reported by firmware")
@@ -1603,11 +1832,13 @@ private fun BatteryTelemetryCard(percent: Double, voltage: Double, reduceAnimati
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Charge", color = Muted, fontSize = 12.sp)
-                    Text("${percent.toInt()}%", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                    Text("${percent.toInt()}%", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Column(horizontalAlignment = Alignment.End) {
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.End) {
                     Text("Voltage", color = Muted, fontSize = 12.sp)
-                    Text(String.format(Locale.US, "%.2f V", voltage), color = Ink, fontSize = 18.sp)
+                    Text(String.format(Locale.US, "%.2f V", voltage), color = Ink, fontSize = 18.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             Box(Modifier.fillMaxWidth().height(8.dp).clip(MaterialTheme.shapes.small).background(tone.copy(alpha = .14f))) {
@@ -1656,16 +1887,16 @@ private fun DashboardGroup(withContainers: Boolean, content: @Composable ColumnS
             shape = RoundedCornerShape(16.dp), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
             Column(Modifier.fillMaxWidth().padding(16.dp), content = content)
         }
-    } else Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 8.dp), content = content)
+    } else Column(Modifier.fillMaxWidth().clipToBounds().padding(horizontal = 4.dp, vertical = 8.dp), content = content)
 }
 
 @Composable
 private fun GroupedSection(title: String, headerAction: (@Composable () -> Unit)? = null,
                            content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxWidth().clipToBounds()) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium,
-                letterSpacing = 0.sp, modifier = Modifier.weight(1f))
+                letterSpacing = 0.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             headerAction?.invoke()
         }
         Spacer(Modifier.height(8.dp))
@@ -2372,6 +2603,64 @@ private fun cirHeatColor(value: Double, maximum: Double): Color {
 }
 
 @Composable
+private fun CirPanel(data: JSONObject?, history: List<CirFrame>, deviceLabel: String,
+                     offline: Boolean, error: String, refreshEnabled: Boolean, onRefresh: () -> Unit) {
+    var detailsOpen by remember(deviceLabel) { mutableStateOf(false) }
+    val capture = data?.takeIf { it.optBoolean("valid") }
+    val waiting = error.ifBlank {
+        when {
+            data?.optBoolean("enabled") == false -> "CIR is disabled in this device's firmware."
+            data != null -> "CIR is enabled; waiting for a UWB packet from another device."
+            else -> "Waiting for automatic CIR updates from the selected device."
+        }
+    }
+    val status = listOf(
+        error.takeIf { it != "Loading CIR..." }.orEmpty(),
+        if (offline && capture != null) "Device offline - showing the last cached CIR capture" else "",
+        if (capture == null) waiting else ""
+    ).filter { it.isNotBlank() }.distinct().joinToString("\n")
+    Box(Modifier.fillMaxWidth().clipToBounds()) {
+        GroupedSection("Channel impulse response") {
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(deviceLabel, color = Muted, fontSize = 14.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                TextButton(enabled = refreshEnabled, onClick = onRefresh) { Text("Refresh") }
+            }
+            // Reserve the same plot space for every capture state while this panel is visible.
+            Box(Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerLow), contentAlignment = Alignment.Center) {
+                if (capture != null) CirPlot(capture, history, Modifier.fillMaxSize())
+                else Box(Modifier.padding(16.dp)) { EmptyHint(waiting) }
+            }
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(capture?.let { "${it.optInt("sample_count")} samples | seq ${it.optLong("sequence")} | age ${it.optLong("age_ms")} ms" }
+                        ?: "No CIR capture yet", color = Muted, style = MaterialTheme.typography.bodySmall,
+                        minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (status.isBlank()) "Live capture" else feedbackSummary(status),
+                        color = if (feedbackIsFailure(status)) Danger else Muted,
+                        style = MaterialTheme.typography.bodySmall, minLines = 1, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                }
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    if (status.isNotBlank()) IconButton(onClick = { detailsOpen = true },
+                        modifier = Modifier.semantics { contentDescription = "Show CIR status details" }) {
+                        InstrumentIcon("info", Muted)
+                    }
+                }
+            }
+        }
+    }
+    if (detailsOpen) AlertDialog(onDismissRequest = { detailsOpen = false },
+        title = { Text("CIR status") },
+        text = { SelectionContainer {
+            Text(status.ifBlank { "CIR capture is current." },
+                modifier = Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()))
+        } },
+        confirmButton = { TextButton(onClick = { detailsOpen = false }) { Text("Done") } })
+}
+
+@Composable
 private fun CirPlot(data: JSONObject, history: List<CirFrame>, modifier: Modifier = Modifier) {
     val iq = remember(data) {
         val array = data.optJSONArray("iq")
@@ -2406,43 +2695,45 @@ private fun CirPlot(data: JSONObject, history: List<CirFrame>, modifier: Modifie
         }
         drawIntoCanvas { it.nativeCanvas.drawText("CIR magnitude", left, 13.dp.toPx(), textPaint) }
 
-        val amplitudeMax = max(iq.maxOrNull() ?: 1.0, 1.0)
-        repeat(4) { tick ->
-            val fraction = tick / 3f
-            val y = traceBottom - fraction * (traceBottom - top)
-            drawLine(Color(0xFF3C4755), androidx.compose.ui.geometry.Offset(left, y),
-                androidx.compose.ui.geometry.Offset(right, y), 1f)
-        }
-        val trace = Path()
-        val area = Path()
-        var started = false
-        iq.forEachIndexed { offset, value ->
-            val sampleIndex = sampleStart + offset
-            if (sampleIndex in windowStart..windowEnd) {
-                val x = left + (sampleIndex - windowStart).toFloat() / windowSpan * (right - left)
-                val y = traceBottom - (traceBottom - top) * (value / (amplitudeMax * 1.08)).toFloat()
-                if (!started) {
-                    trace.moveTo(x, y)
-                    area.moveTo(x, traceBottom)
-                    area.lineTo(x, y)
-                    started = true
-                } else {
-                    trace.lineTo(x, y)
-                    area.lineTo(x, y)
+        clipRect(left = left, top = top, right = right, bottom = traceBottom) {
+            val amplitudeMax = max(iq.maxOrNull() ?: 1.0, 1.0)
+            repeat(4) { tick ->
+                val fraction = tick / 3f
+                val y = traceBottom - fraction * (traceBottom - top)
+                drawLine(Color(0xFF3C4755), androidx.compose.ui.geometry.Offset(left, y),
+                    androidx.compose.ui.geometry.Offset(right, y), 1f)
+            }
+            val trace = Path()
+            val area = Path()
+            var started = false
+            iq.forEachIndexed { offset, value ->
+                val sampleIndex = sampleStart + offset
+                if (sampleIndex in windowStart..windowEnd) {
+                    val x = left + (sampleIndex - windowStart).toFloat() / windowSpan * (right - left)
+                    val y = traceBottom - (traceBottom - top) * (value / (amplitudeMax * 1.08)).toFloat()
+                    if (!started) {
+                        trace.moveTo(x, y)
+                        area.moveTo(x, traceBottom)
+                        area.lineTo(x, y)
+                        started = true
+                    } else {
+                        trace.lineTo(x, y)
+                        area.lineTo(x, y)
+                    }
                 }
             }
-        }
-        if (started) {
-            area.lineTo(left + (sampleStart + iq.lastIndex - windowStart).coerceIn(0, windowSpan).toFloat() /
-                windowSpan * (right - left), traceBottom)
-            area.close()
-            drawPath(area, Color(0xFF25364B))
-            drawPath(trace, Color(0xFF94B5D8), style = Stroke(1.5.dp.toPx()))
-        }
-        if (firstPathVisible) {
-            val x = left + ((firstPath - windowStart) / windowSpan).toFloat() * (right - left)
-            drawLine(Color(0xFFE8AA76), androidx.compose.ui.geometry.Offset(x, top),
-                androidx.compose.ui.geometry.Offset(x, traceBottom), 1.dp.toPx())
+            if (started) {
+                area.lineTo(left + (sampleStart + iq.lastIndex - windowStart).coerceIn(0, windowSpan).toFloat() /
+                    windowSpan * (right - left), traceBottom)
+                area.close()
+                drawPath(area, Color(0xFF25364B))
+                drawPath(trace, Color(0xFF94B5D8), style = Stroke(1.5.dp.toPx()))
+            }
+            if (firstPathVisible) {
+                val x = left + ((firstPath - windowStart) / windowSpan).toFloat() * (right - left)
+                drawLine(Color(0xFFE8AA76), androidx.compose.ui.geometry.Offset(x, top),
+                    androidx.compose.ui.geometry.Offset(x, traceBottom), 1.dp.toPx())
+            }
         }
 
         drawIntoCanvas {
@@ -2450,30 +2741,33 @@ private fun CirPlot(data: JSONObject, history: List<CirFrame>, modifier: Modifie
             it.nativeCanvas.drawText("CIR waterfall \u00b7 oldest to newest \u00b7 ${history.size}",
                 left, heatTop - 7.dp.toPx(), textPaint)
         }
-        drawRect(Color(0xFF202C3C), androidx.compose.ui.geometry.Offset(left, heatTop),
-            androidx.compose.ui.geometry.Size(right - left, heatBottom - heatTop))
-        val strongest = max(history.maxOfOrNull { it.magnitude.maxOrNull() ?: 0.0 } ?: 0.0, 1.0)
-        if (history.isNotEmpty() && heatBottom > heatTop) {
-            val rowHeight = (heatBottom - heatTop) / history.size
-            history.forEachIndexed { row, frame ->
-                val y = heatTop + row * rowHeight
-                frame.magnitude.forEachIndexed { offset, magnitude ->
-                    val sampleIndex = frame.startIndex + offset
-                    if (sampleIndex in windowStart..windowEnd) {
-                        val x0 = left + (sampleIndex - windowStart).toFloat() / windowSpan * (right - left)
-                        val x1 = left + (sampleIndex + 1 - windowStart).toFloat() / windowSpan * (right - left)
-                        drawRect(cirHeatColor(magnitude, strongest),
-                            androidx.compose.ui.geometry.Offset(x0, y),
-                            androidx.compose.ui.geometry.Size(max(1f, x1 - x0 + .4f), rowHeight + .35f))
+        clipRect(left = left, top = heatTop, right = right, bottom = heatBottom) {
+            drawRect(Color(0xFF202C3C), androidx.compose.ui.geometry.Offset(left, heatTop),
+                androidx.compose.ui.geometry.Size(right - left, heatBottom - heatTop))
+            val strongest = max(history.maxOfOrNull { it.magnitude.maxOrNull() ?: 0.0 } ?: 0.0, 1.0)
+            if (history.isNotEmpty() && heatBottom > heatTop) {
+                val rowHeight = (heatBottom - heatTop) / history.size
+                history.forEachIndexed { row, frame ->
+                    val y = heatTop + row * rowHeight
+                    frame.magnitude.forEachIndexed { offset, magnitude ->
+                        val sampleIndex = frame.startIndex + offset
+                        if (sampleIndex in windowStart..windowEnd) {
+                            val x0 = left + (sampleIndex - windowStart).toFloat() / windowSpan * (right - left)
+                            val x1 = left + (sampleIndex + 1 - windowStart).toFloat() / windowSpan * (right - left)
+                            drawRect(cirHeatColor(magnitude, strongest),
+                                androidx.compose.ui.geometry.Offset(x0, y),
+                                androidx.compose.ui.geometry.Size(max(1f, x1 - x0 + .4f), rowHeight + .35f))
+                        }
                     }
                 }
             }
+            if (firstPathVisible) {
+                val x = left + ((firstPath - windowStart) / windowSpan).toFloat() * (right - left)
+                drawLine(Color(0xFFE8AA76), androidx.compose.ui.geometry.Offset(x, heatTop),
+                    androidx.compose.ui.geometry.Offset(x, heatBottom), 1.dp.toPx())
+            }
         }
-        if (firstPathVisible) {
-            val x = left + ((firstPath - windowStart) / windowSpan).toFloat() * (right - left)
-            drawLine(Color(0xFFE8AA76), androidx.compose.ui.geometry.Offset(x, heatTop),
-                androidx.compose.ui.geometry.Offset(x, heatBottom), 1.dp.toPx())
-        }
+
         drawIntoCanvas { canvas ->
             textPaint.textSize = 12.sp.toPx()
             textPaint.color = android.graphics.Color.rgb(186, 197, 211)
@@ -2506,7 +2800,7 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
     val latest = history.lastOrNull()
     val current = if (latest == null) emptyList() else if (acceleration)
         listOf(latest.ax, latest.ay, latest.az) else listOf(latest.gx, latest.gy, latest.gz)
-    Column(modifier) {
+    Column(modifier.clipToBounds()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(title, color = Muted, fontWeight = FontWeight.Medium, fontSize = 14.sp,
                 modifier = Modifier.weight(1f))
@@ -2561,11 +2855,10 @@ private fun ImuChart(title: String, history: List<ImuReading>, acceleration: Boo
                 canvas.nativeCanvas.drawText("-${formatAxisTick(peak)}", labelX, bottom, paint)
             }
         }
-        if (current.isNotEmpty()) {
-            Text(current.mapIndexed { i, value -> "${listOf("X", "Y", "Z")[i]} ${String.format(Locale.US, "%+.2f", value)}" }
-                .joinToString("    "), color = Ink, fontSize = 12.sp,
-                modifier = Modifier.padding(top = 4.dp))
-        }
+        Text(if (current.isEmpty()) "Waiting for samples" else current.mapIndexed { i, value ->
+            "${listOf("X", "Y", "Z")[i]} ${String.format(Locale.US, "%+.2f", value)}"
+        }.joinToString("   |   "), color = Muted, fontSize = 12.sp, minLines = 2, maxLines = 2,
+            overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
     }
 }
 
@@ -2664,7 +2957,7 @@ private class MapViewport {
 
 @Composable
 private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, Position>, names: Map<String, String>,
-                            states: Map<String, DeviceState>, trails: Map<String, List<TrailPoint>>, fitRequest: Int, modifier: Modifier = Modifier, viewport: MapViewport? = null, fitTrails: Boolean = false) {
+                            states: Map<String, DeviceState>, trails: Map<String, List<TrailPoint>>, fitRequest: Int, modifier: Modifier = Modifier, viewport: MapViewport? = null, fitTrails: Boolean = false, trailDurationSeconds: Int? = null) {
     val ink = Ink
     val muted = Muted
     val green = Positive
@@ -2678,6 +2971,14 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
     val anchors = devices.filter { it.role == "anchor" }
     val points = mapFitPoints(devices, positions, trails, fitTrails)
     if (points.isEmpty()) return
+    var trailNow by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(trailDurationSeconds) {
+        if (trailDurationSeconds != null) while (true) {
+            trailNow = System.currentTimeMillis()
+            delay(500)
+        }
+    }
+    val drawnTrails = trailDurationSeconds?.let { trailsWithinDuration(trails, trailNow, it) } ?: trails
     val view = viewport ?: remember { MapViewport() }
     var zoom by view.zoom
     var pan by view.pan
@@ -2877,7 +3178,7 @@ private fun LocalizationMap(devices: List<DeviceRecord>, positions: Map<String, 
 
             // Draw behind anchors, current markers and labels; use the same screen() as markers.
             clipRect {
-                trails.forEach { (tag, history) ->
+                drawnTrails.forEach { (tag, history) ->
                     val path = Path()
                     history.forEachIndexed { index, point ->
                         val at = screen(point.x, point.y)
