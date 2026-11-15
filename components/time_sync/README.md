@@ -2,10 +2,16 @@
 
 Run `idf.py menuconfig`, then open **UWB ranging → Timestamp clock source**.
 
+The local API/discovery starts before clock synchronization. First-use devices
+wait for Android's confirmed role and coordinates; saved Anchors with valid
+coordinates and saved Tags skip that step. Automatic coordinate ranging is an
+exception to the normal sensor clock gate: it uses radio timestamps and uptime.
+`clock_source:"pending"` prevents premature phone-clock requests during setup.
+
 | Choice | Startup and clock behavior |
 | --- | --- |
-| Phone / computer clock (default) | After Wi-Fi, start the local API and wait. The Android app or either desktop dashboard reads `clock_source:"phone"` with `device_time_unix_ms:0` and posts its current UTC epoch milliseconds to `POST /api/time`. That update gives the startup semaphore; only then are sensors initialized. No Internet connection on the ESP is needed. |
-| Time.Now HTTPS API, then SNTP | Try the requested Asia/Kolkata endpoint five times, with five seconds between failures. After five failures, try `pool.ntp.org` for up to ten seconds. If neither succeeds, start the local API and wait for phone/computer time before initializing sensors. |
+| Phone / computer clock (default) | After Wi-Fi and coordinate setup, advertise `clock_source:"phone"` with `device_time_unix_ms:0`. The Android app or desktop dashboard posts UTC epoch milliseconds to `POST /api/time`, releasing normal sensing. Coordinate ranging can run earlier. No Internet connection on the ESP is needed. |
+| Time.Now HTTPS API, then SNTP | Keep the local API available. After coordinate setup, try the Asia/Kolkata endpoint five times, with five seconds between failures, then `pool.ntp.org` for up to ten seconds. If neither succeeds, wait for phone/computer time before normal sensing. |
 
 The setting is compiled into firmware; switching it requires rebuilding and
 flashing. It is independent of the existing local-device HTTP/HTTPS setting.
@@ -29,8 +35,9 @@ Terminal and exported CSV timestamps use `DD-MM-YYYY HH:MM:SS` in IST (UTC+05:30
 - Original phone receipt time is always preserved as `received_at_utc` in the
   private JSONL capture. The 44 CSV columns, I/Q precision, device scope and
   recording pause behavior are unchanged.
-- Until a source synchronizes, `device_time_unix_ms` is zero, sensors wait and
-  terminal sample rows do not start. The rough TLS bootstrap date is hidden.
+- Until a source synchronizes, `device_time_unix_ms` is zero, normal sensing
+  waits and terminal sample rows do not start. Temporary coordinate ranging is
+  permitted. The rough TLS bootstrap date is hidden.
 
 The startup waiter never holds a state mutex while waiting for time or network
 availability. The API remains reachable so a client can release it; see

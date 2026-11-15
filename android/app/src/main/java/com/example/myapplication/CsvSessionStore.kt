@@ -14,6 +14,7 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.io.OutputStreamWriter
+import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
 
 internal data class CsvExportSummary(
@@ -27,7 +28,8 @@ internal data class CsvExportSummary(
 /** App-private append-only session storage; CSV exports stream directly to the destination. */
 internal class CsvSessionStore(
     private val file: File,
-    private val maxBytes: Long = DEFAULT_MAX_BYTES
+    private val maxBytes: Long = DEFAULT_MAX_BYTES,
+    private val appendOutput: (File) -> OutputStream = { FileOutputStream(it, true) }
 ) {
     companion object {
         const val DEFAULT_MAX_BYTES = 512L * 1024L * 1024L
@@ -89,12 +91,61 @@ internal class CsvSessionStore(
     }
 
     // Preferences can lag a completed append after process death; the file is authoritative.
-    private var recordCount = if (file.isFile) file.useLines(StandardCharsets.UTF_8) { lines ->
+    init { recoverTail() }
+
+    @Volatile private var recordCount = if (file.isFile) file.useLines(StandardCharsets.UTF_8) { lines ->
         lines.count { it.isNotBlank() }
     } else 0
 
-    @Synchronized
     fun count(): Int = recordCount
+
+    private fun recoverTail() {
+        if (!file.isFile || file.length() == 0L) return
+        RandomAccessFile(file, "rw").use { input ->
+            val length = input.length()
+            input.seek(length - 1)
+            if (input.read() == '\n'.code) return
+            val buffer = ByteArray(8192)
+            var boundary = 0L
+            var end = length
+            search@ while (end > 0) {
+                val start = (end - buffer.size).coerceAtLeast(0)
+                val count = (end - start).toInt()
+                input.seek(start); input.readFully(buffer, 0, count)
+                for (i in count - 1 downTo 0) if (buffer[i] == '\n'.code.toByte()) {
+                    boundary = start + i + 1
+                    break@search
+                }
+                end = start
+            }
+            val tailLength = length - boundary
+            val complete = if (tailLength <= 1024 * 1024) {
+                val tail = ByteArray(tailLength.toInt())
+                input.seek(boundary); input.readFully(tail)
+                runCatching { JSONObject(String(tail, StandardCharsets.UTF_8)) }.isSuccess
+            } else false
+            if (complete) {
+                input.seek(length); input.write('\n'.code)
+            } else {
+                // Preserve interrupted bytes before repairing the append boundary.
+                FileOutputStream(File(file.parentFile, file.name + ".interrupted"), true).use { backup ->
+                    input.seek(boundary)
+                    while (input.filePointer < length) {
+                        val count = input.read(buffer, 0, minOf(buffer.size.toLong(), length - input.filePointer).toInt())
+                        if (count < 0) throw IOException("Could not preserve interrupted recording")
+                        backup.write(buffer, 0, count)
+                    }
+                    backup.write('\n'.code); backup.fd.sync()
+                }
+                input.setLength(boundary)
+            }
+        }
+    }
+
+    @Synchronized fun clear() {
+        if (file.exists()) RandomAccessFile(file, "rw").use { it.setLength(0); it.fd.sync() }
+        recordCount = 0
+    }
 
     @Synchronized
     @Throws(IOException::class)
@@ -103,9 +154,16 @@ internal class CsvSessionStore(
         if (bytes.size.toLong() + 1 > maxBytes - file.length()) {
             throw IOException("CSV session reached the ${maxBytes / (1024 * 1024)} MiB storage limit")
         }
-        FileOutputStream(file, true).use { output ->
-            output.write(bytes)
-            output.write('\n'.code)
+        val start = file.length()
+        try {
+            appendOutput(file).use { output ->
+                output.write(bytes)
+                output.write('\n'.code)
+            }
+        } catch (error: IOException) {
+            try { RandomAccessFile(file, "rw").use { it.setLength(start) } }
+            catch (rollback: IOException) { error.addSuppressed(rollback) }
+            throw error
         }
         recordCount++
         return recordCount

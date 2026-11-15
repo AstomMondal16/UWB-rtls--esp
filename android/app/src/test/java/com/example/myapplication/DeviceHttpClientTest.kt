@@ -56,6 +56,7 @@ class DeviceHttpClientTest {
     @Test fun phoneClockIsSentOnlyWhenRequestedAndUsesCurrentEpochMilliseconds() {
         assertFalse(needsSystemClock(org.json.JSONObject()))
         assertFalse(needsSystemClock(org.json.JSONObject().put("clock_source", "api")))
+        assertFalse(needsSystemClock(org.json.JSONObject().put("clock_source", "pending").put("setup_state", "coordinates").put("device_time_unix_ms", 0)))
         assertFalse(needsSystemClock(org.json.JSONObject().put("clock_source", "phone").put("device_time_unix_ms", 1793879430391L)))
         assertTrue(needsSystemClock(org.json.JSONObject().put("clock_source", "phone").put("device_time_unix_ms", 0)))
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)

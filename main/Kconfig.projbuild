@@ -19,13 +19,6 @@ config UWB_WIFI_PASSWORD
     string "Wi-Fi password"
     default ""
 
-config UWB_BLE_SERVICE_NAME
-    string "BLE provisioning device name"
-    default ""
-    help
-        Leave empty to derive a unique BLE name from each board's MAC address.
-        An optional custom name may contain up to 32 characters.
-
 config UWB_TLS_ENABLE
     bool "Use HTTPS for the dashboard API"
     depends on ESP_TLS_USING_MBEDTLS && MBEDTLS_TLS_SERVER
@@ -49,14 +42,15 @@ choice UWB_TIME_SOURCE
     config UWB_TIME_SOURCE_PHONE
         bool "Phone / computer clock (no Internet required on ESP)"
         help
-            Start the dashboard API, then wait for the Android app or desktop
-            dashboard to send its clock before initializing sensors. No Internet
+            Start the API, complete or skip coordinate setup in Android, then
+            wait for the app or desktop clock before normal sensing. Coordinate
+            setup ranging can run before time sync. No Internet
             connection is required. CSV uses the app receipt timestamp.
 
     config UWB_TIME_SOURCE_API
         bool "Time.Now HTTPS API, then SNTP fallback"
         help
-            After Wi-Fi connects, try the Asia/Kolkata HTTPS time API five
+            After Wi-Fi and coordinate setup, try the Asia/Kolkata HTTPS time API five
             times, with five seconds between failed attempts. Then try SNTP
             for up to ten seconds. If both sources fail, wait for the phone or
             computer clock over the local network before initializing sensors.

@@ -3,6 +3,7 @@ package com.example.myapplication
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.hypot
 import kotlin.math.sqrt
 
@@ -39,7 +40,8 @@ data class DashboardSnapshot(
     val trails: Map<String, List<TrailPoint>> = emptyMap(),
     val pathRecording: Boolean = false,
     val pathPointCount: Int = 0,
-    val pathError: String = ""
+    val pathError: String = "",
+    val csvStorageBusy: Boolean = false
 ) {
     val allDevicesOffline: Boolean get() = devices.none { states[it.key]?.online == true }
 }
@@ -76,7 +78,7 @@ fun decodeDevices(raw: String): List<DeviceRecord> = try {
         val o = array.optJSONObject(i) ?: return@mapNotNull null
         runCatching { cleanDevice(DeviceRecord(o.optString("mac"), o.optString("ip"),
             o.optString("role", "anchor"), o.optDouble("x"), o.optDouble("y"),
-            o.optDouble("z"), o.optDouble("yaw_offset"))) }.getOrNull()
+            o.optDouble("z", 0.0), o.optDouble("yaw_offset", 0.0))) }.getOrNull()
     }
 } catch (_: Exception) { emptyList() }
 
@@ -92,12 +94,17 @@ fun trilaterate2d(measurements: List<Triple<Double, Double, Double>>): Triple<Do
     val ac = rows.sumOf { it.first * it.third }
     val bc = rows.sumOf { it.second * it.third }
     val determinant = aa * bb - ab * ab
-    if (abs(determinant) < 1e-9) return null
+    if (!determinant.isFinite() || aa <= 0 || bb <= 0 || determinant <= 1e-6 * (aa + bb) * (aa + bb)) return null
     val px = (ac * bb - bc * ab) / determinant
     val py = (aa * bc - ab * ac) / determinant
+    if (!px.isFinite() || !py.isFinite()) return null
     val error = sqrt(measurements.sumOf { (x, y, d) -> (hypot(px - x, py - y) - d) * (hypot(px - x, py - y) - d) } / measurements.size)
     return Triple(px, py, error)
 }
+
+internal fun rangeFits(expected: Double, measured: Double): Boolean =
+    expected.isFinite() && measured.isFinite() && measured > 0 &&
+        abs(expected - measured) <= max(0.20, measured * 0.05)
 
 fun solvePositions(devices: List<DeviceRecord>, ranges: Map<Pair<String, String>, RangeReading>, nowMs: Long): Map<String, Position> {
     val anchors = devices.filter { it.role == "anchor" && it.mac.isNotBlank() }.associateBy { it.mac }
@@ -107,7 +114,7 @@ fun solvePositions(devices: List<DeviceRecord>, ranges: Map<Pair<String, String>
         val used = mutableListOf<String>()
         val measurements = ranges.mapNotNull { (pair, reading) ->
             val anchor = anchors[pair.first] ?: return@mapNotNull null
-            if (pair.second != tag || nowMs - reading.timeMs > 3000 || !reading.distance.isFinite() || reading.distance <= 0) return@mapNotNull null
+            if (pair.second != tag || nowMs - reading.timeMs !in 0..3000 || !reading.distance.isFinite() || reading.distance <= 0) return@mapNotNull null
             val dz = anchor.z - tagZ
             val horizontalSq = reading.distance * reading.distance - dz * dz
             if (horizontalSq <= 0) return@mapNotNull null
@@ -115,7 +122,12 @@ fun solvePositions(devices: List<DeviceRecord>, ranges: Map<Pair<String, String>
             Triple(anchor.x, anchor.y, sqrt(horizontalSq))
         }
         val solved = trilaterate2d(measurements)
-        if (solved != null && listOf(solved.first, solved.second, solved.third).all(Double::isFinite)) result[tag] = Position(solved.first, solved.second, tagZ, solved.third, used)
+        if (solved != null && used.all { id ->
+            val anchor = anchors.getValue(id)
+            rangeFits(hypot(hypot(solved.first - anchor.x, solved.second - anchor.y), tagZ - anchor.z),
+                ranges.getValue(id to tag).distance)
+        })
+            result[tag] = Position(solved.first, solved.second, tagZ, solved.third, used)
     }
     return result
 }

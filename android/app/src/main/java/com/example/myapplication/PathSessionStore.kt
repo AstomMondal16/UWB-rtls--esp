@@ -159,6 +159,7 @@ internal class PathSessionStore(private val directory: File, private val maxPoin
         val trails = linkedMapOf<String, MutableList<TrailPoint>>()
         val pendingBreak = mutableMapOf<String, Boolean>()
         val last = mutableMapOf<String, TrailPoint>()
+        val tagCounts = mutableMapOf<String, Int>()
         var devices = emptyList<DeviceRecord>()
         var count = 0
         val reader = live?.second?.inputStream()?.bufferedReader() ?: file.bufferedReader()
@@ -171,7 +172,9 @@ internal class PathSessionStore(private val directory: File, private val maxPoin
                 val broken = pendingBreak[tag] == true || point.startsSegment
                 val next = point.copy(startsSegment = broken || history.isEmpty())
                 last[tag] = next
-                if (history.isEmpty() || count % stride == 0) {
+                val tagCount = (tagCounts[tag] ?: 0) + 1
+                tagCounts[tag] = tagCount
+                if (history.isEmpty() || tagCount % stride == 0) {
                     history.add(next)
                     pendingBreak[tag] = false
                 } else pendingBreak[tag] = broken

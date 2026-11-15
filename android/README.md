@@ -70,13 +70,32 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
    UDP port `4210`.
 4. Configure discovered devices, or use **Add device** and enter its MAC and IP
    address. Assign each device an **Anchor** or **Tag** role. Set measured
-   coordinates for anchors so the app can map tag positions.
+   coordinates for anchors so the app can map tag positions, or use
+   **Auto-assign coordinates** below X/Y in Add Device. The first Anchor becomes
+   `(0,0)`, the second defines positive X, and the third defines positive Y.
+   Place the third so its intended X and Y are both positive. Further Anchors
+   use at least three non-collinear references. Keep the new device still while
+   ranging, review the filled fields, then confirm **Add Device** to save.
+   Blank Z means `0 m`; leave Z blank for anchors on the same plane. Enter known
+   heights when they differ. Manual coordinates remain available after errors
+   or cancellation, and existing anchors are never repositioned automatically.
+   Tags also offer **Auto-assign coordinates** in Add Device and Edit Device.
+   A Tag needs at least three saved anchors that are not in a straight line;
+   it is located within their existing coordinate frame and remains a Tag.
+   Keep it still during ranging, review X/Y, and confirm Add Device or Save.
+   Blank Z remains zero, and manual entry is always available. This saves a
+   setup position; normal live Tag tracking continues afterward.
 5. Select a device in **Device Selection** to view its IMU and CIR data.
 
 A new board without Wi-Fi credentials opens Bluetooth setup automatically.
 Use **Wi-Fi setup** in Devices; press the board's setup button (GPIO17) when
 changing an existing network. After adding a board, the app sends its clock if
-the board is waiting for time. Sensor initialization and ranging then start.
+the board is waiting for time. Normal sensing then starts; temporary coordinate
+ranging is available before time sync. Confirmed roles/coordinates are saved on
+the board and restored at restart. Offline manual entries synchronize when the
+board reconnects. Automatic setup requires the updated firmware on every
+participating board; it reports an error rather than switching older firmware
+without a cleanup lease.
 See [startup flow](../STARTUP_FLOW.md).
 
 In **Settings > Device configuration**, **Samples per second** sets the shared
@@ -127,6 +146,13 @@ The dashboard API has no client API key; use it only on a trusted local network.
   count, capture time range, and missed telemetry sequence numbers; corrupted
   session rows fail the export instead of being omitted. UWB, IMU and observable
   battery updates are recorded independently for all configured devices.
+  An interrupted final append is repaired on the next app start: complete JSON
+  is retained, while incomplete trailing bytes are preserved in a private
+  `.interrupted` file before truncation. Failed writes roll back that append.
+  **Settings > Files > Clear recorded history** frees recording capacity after
+  confirmation; export anything you need first. It includes unexported records
+  and leaves saved devices and paths intact. Recording is disabled during
+  export or clearing; no old measurements are deleted automatically.
   Selected columns keep the existing schema order, precision, units, timestamp
   formatting and zero-for-missing values. All rows in the frozen recording
   range are exported. Selecting fields changes only the downloaded CSV; raw
@@ -135,6 +161,9 @@ The dashboard API has no client API key; use it only on a trusted local network.
   and retained through activity recreation. The end row stays fixed at Stop.
 - **Tag trails:** Recent valid positions form a separate bounded trail per tag;
   disconnects, invalid positions and long gaps start new segments.
+  Live positions reject nearly collinear geometry and any range whose fitted
+  3D distance differs by more than the greater of 0.20 m or 5% of that range.
+  Saved heights are used; existing manual coordinate frames remain supported.
   In **Settings > Appearance > Localization map > Trail disappears after**,
   choose 5 seconds, 10 seconds, 30 seconds, 1 minute or 2 minutes (default).
   Each point ages out on both live maps, including while paused or disconnected.
@@ -269,7 +298,8 @@ unreadable files expire based on their last filesystem modification time.
 
 Files remain app-private, excluded from cloud backup and device transfer;
 clearing app data or uninstalling removes them. Long previews show roughly
-5,000 positions plus per-tag endpoints and preserve gaps; the saved file keeps
+5,000 positions plus per-tag endpoints and preserve gaps. Preview sampling uses
+each Tag's own point count so alternating Tags retain their paths. The saved file keeps
 all accepted positions. No firmware protocol or CSV schema changes are needed.
 
 JobScheduler lifecycle and persistence follow the Android references:

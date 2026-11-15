@@ -23,6 +23,7 @@
 #define ID_EXTENSION    80
 #define INACTIVE_MS     5000
 #define MAX_TAG_ANCHORS 8
+#define MAX_ANCHOR_TAGS 8
 #define DISCOVERY_SLOTS 8
 #define DISCOVERY_BASE_US 5000
 #define DISCOVERY_SLOT_US 12000
@@ -62,9 +63,16 @@ typedef struct {
     int64_t last_activity_ms;
     int64_t last_heartbeat_ms;
     tag_anchor_t anchors[MAX_TAG_ANCHORS];
+    tag_anchor_t tags[MAX_ANCHOR_TAGS];
+    unsigned tag_count;
+    unsigned radio_errors;
+    unsigned tx_errors;
     unsigned anchor_count;
     unsigned next_anchor;
     int64_t last_discovery_ms;
+    uint32_t setup_generation;
+    uint8_t setup_peers[MAX_TAG_ANCHORS][6];
+    unsigned setup_peer_count;
 } ranging_context_t;
 
 static const char *TAG = "uwb_ranging";
@@ -73,6 +81,11 @@ static uint32_t get_u32(const uint8_t *in);
 static void put_u32(uint8_t *out, uint32_t value);
 static portMUX_TYPE runtime_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool runtime_paused;
+static bool runtime_sleep_allowed = true;
+static uint32_t runtime_setup_generation;
+static uint32_t applied_setup_generation;
+static uint8_t runtime_setup_peers[MAX_TAG_ANCHORS][6];
+static unsigned runtime_setup_peer_count;
 static uwb_ranging_role_t runtime_role;
 static bool role_initialized;
 static uint32_t runtime_period_ms;
@@ -85,6 +98,31 @@ void uwb_ranging_set_paused(bool paused)
     portENTER_CRITICAL(&runtime_lock);
     runtime_paused = paused;
     portEXIT_CRITICAL(&runtime_lock);
+}
+
+void uwb_ranging_set_sleep_allowed(bool allowed)
+{
+    portENTER_CRITICAL(&runtime_lock);
+    runtime_sleep_allowed = allowed;
+    portEXIT_CRITICAL(&runtime_lock);
+}
+
+void uwb_ranging_set_setup(uint32_t generation, const uint8_t peers[][6], unsigned count)
+{
+    if (count > MAX_TAG_ANCHORS) return;
+    portENTER_CRITICAL(&runtime_lock);
+    runtime_setup_generation = generation;
+    runtime_setup_peer_count = count;
+    if (count) memcpy(runtime_setup_peers, peers, count * 6);
+    portEXIT_CRITICAL(&runtime_lock);
+}
+
+uint32_t uwb_ranging_setup_generation(void)
+{
+    portENTER_CRITICAL(&runtime_lock);
+    uint32_t generation = applied_setup_generation;
+    portEXIT_CRITICAL(&runtime_lock);
+    return generation;
 }
 
 esp_err_t uwb_ranging_set_role(uwb_ranging_role_t role)
@@ -158,18 +196,28 @@ uint32_t uwb_ranging_get_period(void)
 
 static esp_err_t sleep_until_resumed(ranging_context_t *ctx)
 {
-    ESP_RETURN_ON_ERROR(dw1000_enter_deep_sleep(), TAG, "DW1000 deep sleep");
+    bool sleeping = false;
     if (ctx->config.on_inactive_device) {
         if (ctx->config.role == UWB_RANGING_TAG) {
             for (unsigned i = 0; i < ctx->anchor_count; ++i)
                 ctx->config.on_inactive_device(&ctx->anchors[i].peer);
-        } else if (ctx->has_peer) ctx->config.on_inactive_device(&ctx->peer);
+        } else for (unsigned i = 0; i < ctx->tag_count; ++i)
+            ctx->config.on_inactive_device(&ctx->tags[i].peer);
     }
     for (;;) {
         sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
         if (!is_paused()) break;
+        portENTER_CRITICAL(&runtime_lock);
+        bool allowed = runtime_sleep_allowed;
+        portEXIT_CRITICAL(&runtime_lock);
+        if (allowed && !sleeping) {
+            ESP_RETURN_ON_ERROR(dw1000_enter_deep_sleep(), TAG, "DW1000 deep sleep");
+            sleeping = true;
+        }
+        if (!allowed && sleeping) break;
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
     }
+    if (!sleeping) return ESP_OK;
     // Wake/reinitialize only in the SPI owner, after BLE has released its pause.
     portENTER_CRITICAL(&runtime_lock);
     uint16_t delay = runtime_antenna_delay;
@@ -196,12 +244,18 @@ static bool accept_sequence(const uint8_t *frame, uint32_t *last, bool *seen)
     return true;
 }
 
-static esp_err_t transmit_frame(uint8_t frame[FRAME_LEN], uint64_t transmit_at,
+static esp_err_t transmit_frame(ranging_context_t *ctx, uint8_t frame[FRAME_LEN], uint64_t transmit_at,
                                 uint64_t *tx_timestamp)
 {
     put_u32(frame + SEQUENCE_OFFSET, ++tx_sequence);
     memset(frame + RESERVED_OFFSET, 0, RESERVED_LEN);
-    return dw1000_transmit(frame, FRAME_LEN, transmit_at, tx_timestamp);
+    esp_err_t err = dw1000_transmit(frame, FRAME_LEN, transmit_at, tx_timestamp);
+    if (err == ESP_OK) ctx->tx_errors = 0;
+    else if ((err == ESP_FAIL || err == ESP_ERR_TIMEOUT) && ++ctx->tx_errors >= 8) {
+        ESP_LOGE(TAG, "repeated local TX failures; restarting radio");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return err;
 }
 
 static int64_t now_ms(void)
@@ -365,11 +419,83 @@ static void peer_active(ranging_context_t *ctx)
 
 static void forget_inactive_peer(ranging_context_t *ctx)
 {
-    if (ctx->has_peer && now_ms() - ctx->last_activity_ms > INACTIVE_MS) {
-        if (ctx->config.on_inactive_device) ctx->config.on_inactive_device(&ctx->peer);
-        ctx->has_peer = false;
-        memset(&ctx->peer, 0, sizeof(ctx->peer));
+    for (unsigned i = 0; i < ctx->tag_count;) {
+        if (now_ms() - ctx->tags[i].last_activity_ms <= INACTIVE_MS) { ++i; continue; }
+        if (ctx->config.on_inactive_device) ctx->config.on_inactive_device(&ctx->tags[i].peer);
+        if (!memcmp(ctx->peer_short, ctx->tags[i].short_address, 2)) ctx->has_peer = false;
+        memmove(&ctx->tags[i], &ctx->tags[i + 1], (--ctx->tag_count - i) * sizeof(ctx->tags[0]));
     }
+}
+
+static void load_peer(ranging_context_t *ctx, const tag_anchor_t *peer)
+{
+    memcpy(ctx->peer_eui, peer->eui, sizeof(ctx->peer_eui));
+    memcpy(ctx->peer_short, peer->short_address, sizeof(ctx->peer_short));
+    ctx->peer = peer->peer;
+    ctx->last_activity_ms = peer->last_activity_ms;
+    ctx->last_sequence = peer->last_sequence;
+    ctx->has_sequence = peer->has_sequence;
+    ctx->has_peer = true;
+}
+
+static void save_peer(const ranging_context_t *ctx, tag_anchor_t *peer)
+{
+    peer->peer = ctx->peer;
+    peer->peer.raw = NULL;
+    peer->last_activity_ms = ctx->last_activity_ms;
+    peer->last_sequence = ctx->last_sequence;
+    peer->has_sequence = ctx->has_sequence;
+}
+
+static tag_anchor_t *anchor_tag(ranging_context_t *ctx, const uint8_t *frame, bool blink, bool *is_new)
+{
+    uint8_t address[2], eui[8];
+    if (blink) decode_blink(frame, eui, address);
+    else decode_short_source(frame, address);
+    for (unsigned i = 0; i < ctx->tag_count; ++i) {
+        tag_anchor_t *tag = &ctx->tags[i];
+        if (memcmp(tag->short_address, address, 2)) continue;
+        if ((blink && memcmp(tag->eui, eui, 8)) ||
+            (!blink && memcmp(tag->peer.device_id, frame + ID_EXTENSION, 6))) return NULL;
+        if (is_new) *is_new = false;
+        return tag;
+    }
+    if (!blink) return NULL;
+    unsigned slot = ctx->tag_count;
+    if (slot == MAX_ANCHOR_TAGS) {
+        slot = 0;
+        for (unsigned i = 1; i < ctx->tag_count; ++i)
+            if (ctx->tags[i].last_activity_ms < ctx->tags[slot].last_activity_ms) slot = i;
+        if (ctx->config.on_inactive_device) ctx->config.on_inactive_device(&ctx->tags[slot].peer);
+    } else ++ctx->tag_count;
+    tag_anchor_t *tag = &ctx->tags[slot];
+    memset(tag, 0, sizeof(*tag));
+    memcpy(tag->short_address, address, 2);
+    memcpy(tag->eui, eui, 8);
+    memcpy(tag->peer.device_id, frame + ID_EXTENSION, 6);
+    tag->last_activity_ms = now_ms();
+    if (is_new) *is_new = true;
+    return tag;
+}
+
+/* Packet loss/timeouts are normal; hardware state errors reach the retry loop. */
+static esp_err_t radio_result(esp_err_t err)
+{
+    if (err == ESP_OK || err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_RESPONSE ||
+        err == ESP_ERR_INVALID_SIZE || err == ESP_FAIL) return ESP_OK;
+    return err;
+}
+
+static esp_err_t receive_frame(ranging_context_t *ctx, uint8_t *frame, size_t capacity,
+                               size_t *length, uint64_t *timestamp, uint32_t timeout_ms)
+{
+    esp_err_t err = dw1000_receive(frame, capacity, length, timestamp, timeout_ms);
+    if (err == ESP_OK) ctx->radio_errors = 0;
+    else if (err == ESP_FAIL && ++ctx->radio_errors >= 8) {
+        ESP_LOGE(TAG, "Repeated receive failures; restarting DW1000");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return err;
 }
 
 static void heartbeat(ranging_context_t *ctx)
@@ -386,14 +512,16 @@ static void heartbeat(ranging_context_t *ctx)
 
 static bool role_changed(ranging_context_t *ctx)
 {
-    if (current_role() == ctx->config.role) return false;
+    portENTER_CRITICAL(&runtime_lock);
+    bool changed = runtime_setup_generation != ctx->setup_generation;
+    portEXIT_CRITICAL(&runtime_lock);
+    if (!changed && current_role() == ctx->config.role) return false;
     if (ctx->config.on_inactive_device) {
         if (ctx->config.role == UWB_RANGING_TAG) {
             for (unsigned i = 0; i < ctx->anchor_count; ++i)
                 ctx->config.on_inactive_device(&ctx->anchors[i].peer);
-        } else if (ctx->has_peer) {
-            ctx->config.on_inactive_device(&ctx->peer);
-        }
+        } else for (unsigned i = 0; i < ctx->tag_count; ++i)
+            ctx->config.on_inactive_device(&ctx->tags[i].peer);
     }
     return true;
 }
@@ -424,6 +552,15 @@ static double asymmetric_tof(uint64_t poll_tx, uint64_t poll_rx,
     return denominator ? (round1 * round2 - reply1 * reply2) / denominator : -1;
 }
 
+static bool setup_peer_allowed(const ranging_context_t *ctx, const uint8_t *frame, size_t length)
+{
+    if (!ctx->setup_generation) return true;
+    if (length >= ID_EXTENSION + 6)
+        for (unsigned i = 0; i < ctx->setup_peer_count; ++i)
+            if (!memcmp(ctx->setup_peers[i], frame + ID_EXTENSION, 6)) return true;
+    return false;
+}
+
 static esp_err_t run_anchor(ranging_context_t *ctx)
 {
     uint16_t own_short = ((uint16_t)ctx->short_address[0] << 8) | ctx->short_address[1];
@@ -443,24 +580,25 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         forget_inactive_peer(ctx);
         size_t length = 0;
         uint64_t poll_rx = 0;
-        esp_err_t err = dw1000_receive(frame, sizeof(frame), &length, &poll_rx, 250);
+        esp_err_t err = receive_frame(ctx, frame, sizeof(frame), &length, &poll_rx, 250);
+        ESP_RETURN_ON_ERROR(radio_result(err), TAG, "anchor receive");
         if (err == ESP_ERR_TIMEOUT) continue;
         if (err != ESP_OK || !valid_frame_length(length)) continue;
 
         int type = message_type(frame, length);
         if (type == MSG_BLINK) {
-            uint8_t previous_eui[8];
-            memcpy(previous_eui, ctx->peer_eui, sizeof(previous_eui));
-            bool is_new = !ctx->has_peer;
+            if (!setup_peer_allowed(ctx, frame, length)) continue;
+            bool is_new = false;
+            tag_anchor_t *tag = anchor_tag(ctx, frame, true, &is_new);
+            if (!tag) continue;
+            load_peer(ctx, tag);
             uint8_t blink_sequence = frame[1];
-            decode_blink(frame, ctx->peer_eui, ctx->peer_short);
-            is_new |= memcmp(previous_eui, ctx->peer_eui, sizeof(previous_eui)) != 0;
-            if (is_new) ctx->has_sequence = false;
             if (!accept_sequence(frame, &ctx->last_sequence,
                                  &ctx->has_sequence)) continue;
             ctx->has_peer = true;
             update_peer_id(ctx, frame, length);
             peer_active(ctx);
+            save_peer(ctx, tag);
             if (is_new && ctx->config.on_new_device) ctx->config.on_new_device(&ctx->peer);
             make_ranging_init(ctx, frame);
             uint32_t identity = ((uint32_t)ctx->short_address[0] << 8) |
@@ -471,7 +609,9 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
             uint32_t slot = identity % DISCOVERY_SLOTS;
             uint64_t response_at = dw1000_future_tx_time(
                 DISCOVERY_BASE_US + slot * DISCOVERY_SLOT_US);
-            if (response_at && transmit_frame(frame, response_at, NULL) == ESP_OK) {
+            err = response_at ? transmit_frame(ctx, frame, response_at, NULL) : ESP_ERR_TIMEOUT;
+            ESP_RETURN_ON_ERROR(radio_result(err), TAG, "anchor discovery reply");
+            if (err == ESP_OK) {
 #ifdef CONFIG_UWB_CIR_ENABLE
                 /* Save CIR from the tag's discovery blink as well as ranging.
                  * Capture after the scheduled reply so SPI reads cannot delay it. */
@@ -483,8 +623,10 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
             }
             continue;
         }
-        if (!ctx->has_peer || type != MSG_POLL || !short_for_us(ctx, frame) || !from_peer(ctx, frame))
-            continue;
+        if (type != MSG_POLL || !short_for_us(ctx, frame) || !setup_peer_allowed(ctx, frame, length)) continue;
+        tag_anchor_t *tag = anchor_tag(ctx, frame, false, NULL);
+        if (!tag) continue;
+        load_peer(ctx, tag);
         if (!accept_sequence(frame, &ctx->last_sequence,
                              &ctx->has_sequence)) continue;
 
@@ -494,6 +636,7 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         if (reply_us < 2000 || reply_us > 20000) continue;
         update_peer_id(ctx, frame, length);
         peer_active(ctx);
+        save_peer(ctx, tag);
 
         memset(&ctx->raw, 0, sizeof(ctx->raw));
         ctx->raw.peer_rx_power_dbm = NAN;
@@ -503,13 +646,16 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         uint64_t ack_at = dw1000_future_tx_time(reply_us);
         uint64_t ack_tx = 0;
         make_short_header(ctx, frame, ctx->peer_short, MSG_POLL_ACK);
-        if (!ack_at || transmit_frame(frame, ack_at, &ack_tx) != ESP_OK) continue;
+        err = ack_at ? transmit_frame(ctx, frame, ack_at, &ack_tx) : ESP_ERR_TIMEOUT;
+        ESP_RETURN_ON_ERROR(radio_result(err), TAG, "anchor poll reply");
+        if (err != ESP_OK) continue;
         memcpy(ctx->raw.frames[1], frame, FRAME_LEN);
         ctx->raw.frame_lengths[1] = FRAME_LEN;
         ctx->raw.tx_success_mask |= 1u << 1;
 
         uint64_t range_rx = 0;
-        err = dw1000_receive(frame, sizeof(frame), &length, &range_rx, 150);
+        err = receive_frame(ctx, frame, sizeof(frame), &length, &range_rx, 150);
+        ESP_RETURN_ON_ERROR(radio_result(err), TAG, "anchor range receive");
         if (err != ESP_OK || !valid_frame_length(length) ||
             message_type(frame, length) != MSG_RANGE ||
             !short_for_us(ctx, frame) || !from_peer(ctx, frame)) continue;
@@ -517,6 +663,7 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
                              &ctx->has_sequence)) continue;
         entry = find_our_entry(ctx, frame, length, 17);
         if (entry < 0) continue;
+        save_peer(ctx, tag);
 
         uint64_t poll_tx = get_u40(frame + entry + 2);
         uint64_t ack_rx = get_u40(frame + entry + 7);
@@ -541,12 +688,14 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         ctx->peer.range_m = distance;
         ctx->peer.rx_power_dbm = rx_power;
         peer_active(ctx);
+        save_peer(ctx, tag);
         make_short_header(ctx, frame, ctx->peer_short, MSG_RANGE_REPORT);
         memcpy(frame + SHORT_MAC_LEN + 1, &distance, sizeof(distance));
         memcpy(frame + SHORT_MAC_LEN + 5, &rx_power, sizeof(rx_power));
         uint64_t report_at = dw1000_future_tx_time(ctx->config.reply_delay_us);
         if (report_at) {
-            esp_err_t report_error = transmit_frame(frame, report_at, NULL);
+            esp_err_t report_error = transmit_frame(ctx, frame, report_at, NULL);
+            ESP_RETURN_ON_ERROR(radio_result(report_error), TAG, "anchor range report");
             memcpy(ctx->raw.frames[3], frame, FRAME_LEN);
             ctx->raw.frame_lengths[3] = FRAME_LEN;
             if (report_error == ESP_OK) {
@@ -563,6 +712,7 @@ static esp_err_t run_anchor(ranging_context_t *ctx)
         if (cir_err != ESP_OK) ESP_LOGW(TAG, "CIR capture: %s", esp_err_to_name(cir_err));
 #endif
         ctx->peer.raw = &ctx->raw;
+        ctx->peer.setup_generation = ctx->setup_generation;
         if (ctx->config.on_range) ctx->config.on_range(&ctx->peer);
         ctx->peer.raw = NULL;
     }
@@ -580,6 +730,7 @@ static int find_tag_anchor(const ranging_context_t *ctx,
 static bool remember_tag_anchor(ranging_context_t *ctx, const uint8_t *frame,
                                 size_t length)
 {
+    if (!setup_peer_allowed(ctx, frame, length)) return false;
     uint8_t short_address[2] = {frame[14], frame[13]};
     int found = find_tag_anchor(ctx, short_address);
     if (found < 0 && ctx->anchor_count >= MAX_TAG_ANCHORS) return false;
@@ -604,17 +755,20 @@ static bool remember_tag_anchor(ranging_context_t *ctx, const uint8_t *frame,
     return true;
 }
 
-static void discover_anchors(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
+static esp_err_t discover_anchors(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
 {
     make_blink(ctx, frame);
-    if (transmit_frame(frame, 0, NULL) != ESP_OK) return;
+    esp_err_t sent = transmit_frame(ctx, frame, 0, NULL);
+    ESP_RETURN_ON_ERROR(radio_result(sent), TAG, "tag discovery transmit");
+    if (sent != ESP_OK) return ESP_OK;
     int64_t deadline = now_ms() + DISCOVERY_WINDOW_MS;
     uint16_t cir_peer_address = 0;
     while (now_ms() < deadline) {
         size_t length = 0;
         uint32_t remaining_ms = (uint32_t)(deadline - now_ms());
-        esp_err_t err = dw1000_receive(frame, FRAME_LEN, &length, NULL,
+        esp_err_t err = receive_frame(ctx, frame, FRAME_LEN, &length, NULL,
                                       remaining_ms ? remaining_ms : 1);
+        ESP_RETURN_ON_ERROR(radio_result(err), TAG, "tag discovery receive");
         if (err == ESP_ERR_TIMEOUT) break;
         if (err != ESP_OK || !valid_frame_length(length) ||
             message_type(frame, length) != MSG_RANGING_INIT ||
@@ -633,26 +787,17 @@ static void discover_anchors(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     }
 #endif
     ctx->last_discovery_ms = now_ms();
+    return ESP_OK;
 }
 
 static void load_tag_anchor(ranging_context_t *ctx, unsigned index)
 {
-    tag_anchor_t *anchor = &ctx->anchors[index];
-    memcpy(ctx->peer_eui, anchor->eui, sizeof(ctx->peer_eui));
-    memcpy(ctx->peer_short, anchor->short_address, sizeof(ctx->peer_short));
-    ctx->peer = anchor->peer;
-    ctx->last_activity_ms = anchor->last_activity_ms;
-    ctx->last_sequence = anchor->last_sequence;
-    ctx->has_sequence = anchor->has_sequence;
-    ctx->has_peer = true;
+    load_peer(ctx, &ctx->anchors[index]);
 }
 
 static void save_tag_anchor(ranging_context_t *ctx, unsigned index)
 {
-    ctx->anchors[index].peer = ctx->peer;
-    ctx->anchors[index].last_activity_ms = ctx->last_activity_ms;
-    ctx->anchors[index].last_sequence = ctx->last_sequence;
-    ctx->anchors[index].has_sequence = ctx->has_sequence;
+    save_peer(ctx, &ctx->anchors[index]);
 }
 
 static void forget_inactive_anchors(ranging_context_t *ctx)
@@ -685,7 +830,7 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     memcpy(frame + SHORT_MAC_LEN + 2, ctx->peer_short, 2);
     put_u16(frame + SHORT_MAC_LEN + 4, ctx->config.reply_delay_us);
     uint64_t poll_tx = 0;
-    ESP_RETURN_ON_ERROR(transmit_frame(frame, 0, &poll_tx), TAG, "POLL transmit");
+    ESP_RETURN_ON_ERROR(transmit_frame(ctx, frame, 0, &poll_tx), TAG, "POLL transmit");
     memcpy(ctx->raw.frames[0], frame, FRAME_LEN);
     ctx->raw.frame_lengths[0] = FRAME_LEN;
     ctx->raw.tx_success_mask |= 1u << 0;
@@ -694,8 +839,9 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
 
     size_t length = 0;
     uint64_t ack_rx = 0;
-    esp_err_t err = dw1000_receive(frame, FRAME_LEN, &length, &ack_rx, 150);
-    if (err != ESP_OK || !valid_frame_length(length) ||
+    esp_err_t err = receive_frame(ctx, frame, FRAME_LEN, &length, &ack_rx, 150);
+    if (err != ESP_OK) return err;
+    if (!valid_frame_length(length) ||
         message_type(frame, length) != MSG_POLL_ACK ||
         !short_for_us(ctx, frame) || !from_peer(ctx, frame)) return ESP_ERR_INVALID_RESPONSE;
     if (!accept_sequence(frame, &ctx->last_sequence,
@@ -714,15 +860,16 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     put_u40(frame + SHORT_MAC_LEN + 9, ack_rx);
     ctx->raw.timestamps[4] = dw1000_expected_tx_time(range_at);
     put_u40(frame + SHORT_MAC_LEN + 14, ctx->raw.timestamps[4]);
-    ESP_RETURN_ON_ERROR(transmit_frame(frame, range_at, NULL), TAG, "RANGE transmit");
+    ESP_RETURN_ON_ERROR(transmit_frame(ctx, frame, range_at, NULL), TAG, "RANGE transmit");
     memcpy(ctx->raw.frames[2], frame, FRAME_LEN);
     ctx->raw.frame_lengths[2] = FRAME_LEN;
     ctx->raw.tx_success_mask |= 1u << 2;
     ctx->raw.timestamp_valid_mask |= 1u << 4;
     ctx->raw.expected_timestamp_mask |= 1u << 4;
 
-    err = dw1000_receive(frame, FRAME_LEN, &length, NULL, 150);
-    if (err != ESP_OK || !valid_frame_length(length) ||
+    err = receive_frame(ctx, frame, FRAME_LEN, &length, NULL, 150);
+    if (err != ESP_OK) return err;
+    if (!valid_frame_length(length) ||
         message_type(frame, length) != MSG_RANGE_REPORT ||
         !short_for_us(ctx, frame) || !from_peer(ctx, frame)) return ESP_ERR_INVALID_RESPONSE;
     if (!accept_sequence(frame, &ctx->last_sequence,
@@ -751,6 +898,7 @@ static esp_err_t range_once(ranging_context_t *ctx, uint8_t frame[FRAME_LEN])
     if (cir_err != ESP_OK) ESP_LOGW(TAG, "CIR capture: %s", esp_err_to_name(cir_err));
 #endif
     ctx->peer.raw = &ctx->raw;
+    ctx->peer.setup_generation = ctx->setup_generation;
     if (ctx->config.on_range) ctx->config.on_range(&ctx->peer);
     ctx->peer.raw = NULL;
     return ESP_OK;
@@ -774,11 +922,13 @@ static esp_err_t run_tag(ranging_context_t *ctx)
         forget_inactive_anchors(ctx);
         if (!ctx->anchor_count ||
             now_ms() - ctx->last_discovery_ms >= DISCOVERY_INTERVAL_MS)
-            discover_anchors(ctx, frame);
+            ESP_RETURN_ON_ERROR(discover_anchors(ctx, frame), TAG, "tag discovery");
         if (ctx->anchor_count) {
             unsigned index = ctx->next_anchor++ % ctx->anchor_count;
             load_tag_anchor(ctx, index);
-            if (range_once(ctx, frame) == ESP_OK)
+            esp_err_t err = range_once(ctx, frame);
+            ESP_RETURN_ON_ERROR(radio_result(err), TAG, "tag range");
+            if (err == ESP_OK)
                 save_tag_anchor(ctx, index);
         }
         sensor_coordinator_wait_period(uwb_ranging_get_period(), cycle_started_us);
@@ -822,8 +972,15 @@ esp_err_t uwb_ranging_run(const uwb_ranging_config_t *config)
     sensor_coordinator_checkpoint(SENSOR_COORDINATOR_UWB);
     for (;;) {
         ctx.config.role = current_role();
+        portENTER_CRITICAL(&runtime_lock);
+        ctx.setup_generation = runtime_setup_generation;
+        ctx.setup_peer_count = runtime_setup_peer_count;
+        memcpy(ctx.setup_peers, runtime_setup_peers, sizeof(ctx.setup_peers));
+        applied_setup_generation = ctx.setup_generation;
+        portEXIT_CRITICAL(&runtime_lock);
         ctx.has_peer = false;
         ctx.anchor_count = ctx.next_anchor = 0;
+        ctx.tag_count = ctx.radio_errors = ctx.tx_errors = 0;
         ctx.last_discovery_ms = 0;
         memset(&ctx.peer, 0, sizeof(ctx.peer));
         ctx.last_activity_ms = ctx.last_heartbeat_ms = now_ms();

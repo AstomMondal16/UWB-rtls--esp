@@ -158,8 +158,12 @@ static void start_provisioning(void)
         notify_app(BLE_PROVISIONING_START_FAILED, &err);
         return;
     }
+    char session_name[33];
+    portENTER_CRITICAL(&state_lock);
+    strlcpy(session_name, service_name, sizeof(session_name));
+    portEXIT_CRITICAL(&state_lock);
     ESP_LOGI(TAG, "sensor pause acknowledged; starting provisioning service %s",
-             service_name);
+             session_name);
     err = prepare_cb ? prepare_cb(app_arg) : ESP_OK;
     if (err != ESP_OK) {
         sensor_coordinator_resume_after_ble(SENSOR_COORDINATOR_BLE_FAILED);
@@ -176,9 +180,9 @@ static void start_provisioning(void)
     } else {
         set_active(true);
         err = network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1,
-                                                   NULL, service_name, NULL);
+                                                   NULL, session_name, NULL);
         if (err == ESP_OK) {
-            ESP_LOGI(TAG, "BLE provisioning requested as %s", service_name);
+            ESP_LOGI(TAG, "BLE provisioning requested as %s", session_name);
             return;
         }
         set_active(false);
@@ -322,6 +326,16 @@ esp_err_t ble_provisioning_init(const char *name,
     ESP_LOGI(TAG, "BLE provisioning component ready; button GPIO%d, name=%s",
              BUTTON_GPIO, service_name);
     xSemaphoreGive(init_lock);
+    return ESP_OK;
+}
+
+esp_err_t ble_provisioning_set_service_name(const char *name)
+{
+    if (!name || !name[0] || strlen(name) >= sizeof(service_name)) return ESP_ERR_INVALID_ARG;
+    if (!commands) return ESP_ERR_INVALID_STATE;
+    portENTER_CRITICAL(&state_lock);
+    strlcpy(service_name, name, sizeof(service_name));
+    portEXIT_CRITICAL(&state_lock);
     return ESP_OK;
 }
 

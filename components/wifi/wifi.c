@@ -31,6 +31,43 @@ static bool previous_valid;
 static bool provisioning_transaction_pending;
 static volatile bool retry_saved_network;
 static wifi_config_t previous_config;
+static uint8_t saved_ble_octet;
+static bool ble_octet_saved;
+
+static void load_ble_octet(void)
+{
+    nvs_handle_t storage;
+    esp_err_t err = nvs_open("wifi_ble", NVS_READONLY, &storage);
+    if (err == ESP_OK) {
+        err = nvs_get_u8(storage, "last_octet", &saved_ble_octet);
+        nvs_close(storage);
+    }
+    ble_octet_saved = err == ESP_OK;
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
+        ESP_LOGW(TAG, "could not load last BLE IP suffix: %s", esp_err_to_name(err));
+}
+
+static void update_ble_octet(uint8_t last_octet)
+{
+    char name[8];
+    ble_provisioning_name_from_ip(last_octet, name);
+    esp_err_t err = ble_provisioning_set_service_name(name);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "could not update next BLE name: %s", esp_err_to_name(err));
+    else ESP_LOGI(TAG, "next BLE provisioning name: %s", name);
+    if (ble_octet_saved && saved_ble_octet == last_octet) return;
+    nvs_handle_t storage;
+    err = nvs_open("wifi_ble", NVS_READWRITE, &storage);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(storage, "last_octet", last_octet);
+        if (err == ESP_OK) err = nvs_commit(storage);
+        nvs_close(storage);
+    }
+    if (err == ESP_OK) {
+        saved_ble_octet = last_octet;
+        ble_octet_saved = true;
+    } else ESP_LOGW(TAG, "could not save BLE IP suffix: %s", esp_err_to_name(err));
+}
 
 void wifi_set_connection_callback(wifi_connection_callback_t callback, void *arg)
 {
@@ -227,6 +264,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *got_ip = data;
+        update_ble_octet(esp_ip4_addr4(&got_ip->ip_info.ip));
         ESP_LOGI(TAG, "Wi-Fi connected at " IPSTR, IP2STR(&got_ip->ip_info.ip));
         if (info_out) snprintf(info_out->ip_address, sizeof(info_out->ip_address), IPSTR,
                                 IP2STR(&got_ip->ip_info.ip));
@@ -266,6 +304,7 @@ esp_err_t wifi_connect(wifi_info_t *info)
         return err;
     }
     if (err != ESP_OK) return err;
+    load_ble_octet();
     if ((err = esp_netif_init()) != ESP_OK) return err;
     if ((err = esp_event_loop_create_default()) != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
     events = xEventGroupCreate();
@@ -280,23 +319,8 @@ esp_err_t wifi_connect(wifi_info_t *info)
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK) return err;
     if ((err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK) return err;
 
-    uint8_t mac[6];
-    if ((err = esp_wifi_get_mac(WIFI_IF_STA, mac)) != ESP_OK) return err;
-    char service_name[33];
-    if (CONFIG_UWB_BLE_SERVICE_NAME[0]) {
-        const char *configured_name = CONFIG_UWB_BLE_SERVICE_NAME;
-        size_t configured_length = strlen(configured_name);
-        if (configured_length >= sizeof(service_name)) {
-            ESP_LOGE(TAG, "BLE provisioning name is too long (%u characters; maximum is %u)",
-                     (unsigned)configured_length,
-                     (unsigned)(sizeof(service_name) - 1));
-            return ESP_ERR_INVALID_ARG;
-        }
-        strlcpy(service_name, configured_name, sizeof(service_name));
-    } else {
-        snprintf(service_name, sizeof(service_name), "UWB_%02X%02X%02X",
-                 mac[3], mac[4], mac[5]);
-    }
+    char service_name[8];
+    ble_provisioning_name_from_ip(saved_ble_octet, service_name);
     ESP_LOGI(TAG, "BLE provisioning advertised name: %s", service_name);
     if ((err = ble_provisioning_init(service_name, prepare_wifi_provisioning,
                                      provisioning_event, NULL)) != ESP_OK)

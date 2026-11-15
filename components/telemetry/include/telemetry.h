@@ -7,6 +7,7 @@
 
 typedef struct {
     uint64_t timestamp_ms;
+    uint32_t setup_generation;
     uint8_t peer_id[6];
     float distance_m;
     float speed_mps;
@@ -61,6 +62,9 @@ int64_t telemetry_clock_unix_ms(void);
 
 /* Startup task waits without holding a mutex; the time endpoint signals readiness. */
 bool telemetry_wait_for_clock(uint32_t timeout_ms);
+void telemetry_set_clock_status(bool allowed, bool synchronized, bool phone);
+void telemetry_set_sensor_state(const char *role, bool streaming, uint32_t period_ms,
+                                uint32_t setup_generation);
 
 /* Complete raw CIR JSON, or NULL on failure. Optional capture_valid reports valid I/Q. Caller frees(). */
 char *telemetry_copy_cir_json(bool *capture_valid);

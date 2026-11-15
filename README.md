@@ -9,13 +9,18 @@ The startup and runtime flow is intentional:
 
 1. Connect using saved Wi-Fi credentials, or first-boot menuconfig credentials.
    If neither is present, open BLE setup and wait for a successful connection.
-2. Synchronize time. API mode tries Time.Now five times, then SNTP. Phone mode,
-   or an API failure, exposes the local API and waits for the app/dashboard clock.
-3. After valid time and Wi-Fi are available, initialize enabled sensors, allow
+2. Start the local API and discovery. On first use, confirm the role and required
+   coordinates in Android's Add Device form. Manual entry and **Auto-assign
+   coordinates** are available; blank Z means zero. Confirmed settings persist
+   on the device. Saved devices skip this step when their configuration is valid.
+3. Synchronize time. API mode tries Time.Now five times, then SNTP; phone mode
+   or API failure waits for the app/dashboard clock. Coordinate setup ranging
+   can initialize sensors and run before this step, using temporary role leases.
+4. After valid time and Wi-Fi are available, initialize remaining sensors, allow
    one second for settling, then start anchor/tag ranging on CPU1. Failed IMU
    initialization is reported and retried without stopping the other sensors.
-4. Pass range samples through the bounded queue to CPU0's telemetry service.
-5. Press the active-low GPIO17 setup button at any time to open BLE again.
+5. Pass range samples through the bounded queue to CPU0's telemetry service.
+6. Press the active-low GPIO17 setup button at any time to open BLE again.
    Sensor tasks acknowledge a safe pause before BLE starts and resume afterward.
 
 See [startup and task coordination](STARTUP_FLOW.md) for the clock gate,
@@ -236,9 +241,15 @@ starts UWB sensing on the device through its HTTP API. `ZERO` makes the current
 orientation the visual reference; `GRID ON/OFF` controls its reference grid.
 After telemetry arrives, `CONNECT` becomes `DISCONNECT`. Select `TAG` or
 `ANCHOR`, enter the sensing/network intervals, and press `APPLY` to change the
-running ESP role. This runtime selection is intentionally cleared by a reboot.
+running ESP role. Reboot restores the role committed in Android's device map;
+desktop APPLY remains a runtime override. First-use configuration is completed
+in Android before a desktop dashboard supplies the clock.
 Press `SAVE` to export the collected session as CSV or JSON with a timestamped
 default filename.
+
+Both localization clients reject nearly collinear geometry and inconsistent
+live positions. Each fitted 3D anchor distance must agree with its measured
+range within the greater of 0.20 m or 5%; configured heights are respected.
 
 Preview and test it without hardware:
 

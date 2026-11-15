@@ -12,6 +12,7 @@ typedef enum {
 
 typedef struct {
     uint8_t device_id[6];
+    uint32_t setup_generation;
     uint16_t short_address;
     float range_m;
     float rx_power_dbm;
@@ -40,6 +41,9 @@ esp_err_t uwb_ranging_run(const uwb_ranging_config_t *config);
 
 /* Runtime controls used by the LAN dashboard. */
 void uwb_ranging_set_paused(bool paused);
+void uwb_ranging_set_sleep_allowed(bool allowed);
+void uwb_ranging_set_setup(uint32_t generation, const uint8_t peers[][6], unsigned count);
+uint32_t uwb_ranging_setup_generation(void);
 esp_err_t uwb_ranging_set_role(uwb_ranging_role_t role);
 esp_err_t uwb_ranging_set_period(uint32_t period_ms);
 /* Shared UWB/IMU target period, including the startup default before ranging starts. */

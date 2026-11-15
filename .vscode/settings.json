@@ -33,5 +33,6 @@
     "--compile-commands-dir=c:\\Users\\Astom\\Desktop\\codes\\pcb_v1\\build"
   ],
   "idf.flashType": "UART",
+  "idf.monitorNoReset": true,
   "idf.port": "COM6"
 }

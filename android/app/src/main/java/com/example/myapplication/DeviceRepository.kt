@@ -33,6 +33,10 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private val workers = Executors.newScheduledThreadPool(2)
     private val pollWorkers = Executors.newFixedThreadPool(8)
     private val exportWorker = Executors.newSingleThreadExecutor()
+    private val setupWorker = Executors.newSingleThreadExecutor()
+    private val setupParticipants = ConcurrentHashMap.newKeySet<String>()
+    private val configurationSyncing = ConcurrentHashMap.newKeySet<String>()
+    private var anchorSetup: AnchorSetupSession? = null
     private val polling = ConcurrentHashMap.newKeySet<String>()
     private val pollSchedule = DevicePollSchedule()
     private val publishPending = AtomicBoolean(false)
@@ -63,6 +67,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     private var pathCleanupWarning = ""
     @Volatile private var nextPathRetryAtMs = 0L
     @Volatile private var collecting = false
+    private var csvStorageBusy = false
     private var recordingStartCount = csvStore.count()
     private var recordingStartedAtMs: Long? = null
     private var streamingPending = false
@@ -106,7 +111,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
             solvePositions(devices, ranges, now), status, collecting, csvStore.count(),
             if (calibration.isEmpty()) "" else "${calibration.values.minOf { it.samples.size }}/100 samples per anchor",
             streamingPending, recordingStartCount, recordingStartedAtMs, trailStore.snapshot(now), pathRecording, pathPointCount,
-            listOf(pathError, pathCleanupWarning).filter { it.isNotBlank() }.joinToString("\n"))
+            listOf(pathError, pathCleanupWarning).filter { it.isNotBlank() }.joinToString("\n"), csvStorageBusy)
     }
 
     private fun publish() {
@@ -270,6 +275,20 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
             val source = mac.ifBlank { oldKey }
             val oldSample = states[source]?.sample
             states[source] = DeviceState(true, sample)
+            if (sample.optString("setup_state") == "ranging" || setupParticipants.contains(source)) {
+                breakDeviceTrail(source)
+                return@synchronized
+            }
+            val saved = devices.firstOrNull { it.mac == mac || it.key == device.key } ?: device
+            if (needsDeviceConfiguration(saved, sample) && configurationSyncing.add(source)) workers.execute {
+                try {
+                    if (!setupParticipants.contains(source)) postSetup(saved.copy(mac = mac, ip = ip),
+                        JSONObject().put("action", "commit").put("role", saved.role)
+                            .put("x", saved.x).put("y", saved.y).put("z", saved.z))
+                } catch (error: Exception) {
+                    setStatus("Device configuration pending for $source: ${error.message ?: "connection failed"}")
+                } finally { configurationSyncing.remove(source) }
+            }
             if (needsSystemClock(sample) && clockSyncing.add(source)) workers.execute {
                 try {
                     val connection = openApiConnection("$ip/api/time", source)
@@ -357,10 +376,78 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                 finishPathForDeviceChange()
                 trailStore.clear()
                 prefs.edit().putString("devices", encodeDevices(devices)).apply()
-                status = "${if (index >= 0) "Updated" else "Added"} ${clean.key}"
+                status = "${if (index >= 0) "Updated" else "Added"} ${clean.key}" +
+                    if (clean.ip.isBlank() || states[clean.key]?.online != true) " · device configuration pending until connected" else ""
             }
             publish(); null
         } catch (e: IllegalArgumentException) { e.message ?: "Invalid device" }
+    }
+
+    private fun postSetup(device: DeviceRecord, body: JSONObject) {
+        val connection = openApiConnection("${device.ip}/api/setup", device.mac)
+        connection.connectTimeout = 1500
+        connection.readTimeout = 1500
+        withReusableDeviceConnection(connection) {
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.outputStream.use { it.write(body.toString().toByteArray(StandardCharsets.UTF_8)) }
+            check(JSONObject(readDeviceResponse(connection, MAX_CONTROL_BYTES)).optBoolean("ok")) {
+                "Device did not accept setup command"
+            }
+        }
+    }
+
+    fun cancelAnchorCoordinates() { synchronized(lock) { anchorSetup?.cancel() } }
+
+    fun autoAssignCoordinates(draft: DeviceRecord, progress: (String) -> Unit,
+                              callback: (Pair<Double, Double>?, String?) -> Unit) {
+        val candidate: DeviceRecord
+        val references: List<DeviceRecord>
+        val session: AnchorSetupSession
+        synchronized(lock) {
+            if (anchorSetup != null || calibration.isNotEmpty() || streamingPending) {
+                main.post { callback(null, "Wait for the current device operation to finish") }
+                return
+            }
+            fun resolve(record: DeviceRecord): DeviceRecord {
+                val mac = normalizeMac(record.mac)
+                val found = discovered[mac] ?: discovered.values.firstOrNull { it.ip == record.ip }
+                return record.copy(mac = mac.ifBlank { found?.mac.orEmpty() },
+                    ip = found?.ip ?: record.ip.trim())
+            }
+            candidate = resolve(draft)
+            references = anchorReferences(devices, candidate).map(::resolve)
+            session = AnchorSetupSession(object : AnchorSetupTransport {
+                override fun read(device: DeviceRecord): JSONObject = getJson("${device.ip}/api/telemetry", device.mac)
+                override fun post(device: DeviceRecord, body: JSONObject) = postSetup(device, body)
+            }, SystemClock::elapsedRealtime)
+            anchorSetup = session
+            setupParticipants.addAll((references + candidate).map { it.mac })
+        }
+        setupWorker.execute {
+            val result = runCatching {
+                session.run(candidate, references) { message -> main.post { if (!closed.get()) progress(message) } }.also {
+                    synchronized(lock) {
+                        require(anchorReferences(devices, candidate).map { it.copy(ip = "") } ==
+                            references.map { it.copy(ip = "") }) { "Reference coordinates changed; retry assignment" }
+                    }
+                }
+            }
+            synchronized(lock) {
+                if (anchorSetup === session) anchorSetup = null
+                setupParticipants.clear()
+                references.forEach { breakDeviceTrail(it.mac) }
+                breakDeviceTrail(candidate.mac)
+            }
+            main.post {
+                val failure = result.exceptionOrNull()
+                val message = failure?.let {
+                    (listOf(it.message ?: "Coordinate assignment failed") + it.suppressed.mapNotNull { suppressed -> suppressed.message }).joinToString(" ")
+                }
+                if (!closed.get()) callback(result.getOrNull(), message)
+            }
+        }
     }
 
     fun remove(key: String) {
@@ -389,6 +476,10 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
 
     fun setCollecting(value: Boolean): IntRange {
         val bounds = synchronized(lock) {
+            if (csvStorageBusy) {
+                status = "Wait for CSV storage to finish"
+                return@synchronized recordingStartCount until csvStore.count()
+            }
             if (value && devices.isEmpty()) {
                 status = "Add a device before collecting"
                 return@synchronized recordingStartCount until csvStore.count()
@@ -409,6 +500,7 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
     }
 
     fun startOrCancelCalibration(): String? = synchronized(lock) {
+        if (anchorSetup != null) return "Finish coordinate assignment before calibrating"
         if (calibration.isNotEmpty()) {
             calibration.clear(); status = "Antenna delay calibration cancelled"; publish(); return null
         }
@@ -462,14 +554,23 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                            callback: (Result<CsvExportSummary>) -> Unit) {
         val frozenFields = fields.toList()
         val end = synchronized(lock) {
+            if (csvStorageBusy) {
+                runCatching { output.close() }
+                main.post { callback(Result.failure(IOException("CSV storage is busy"))) }
+                return
+            }
+            csvStorageBusy = true
+            collecting = false
+            recorder.stop()
             // Stop/export is ordered after every accepted synchronous append.
-            val frozenEnd = endingAtRecord ?: csvStore.count().also { collecting = false; recorder.stop() }
+            val frozenEnd = endingAtRecord ?: csvStore.count()
             status = "Exporting ${frozenEnd - startingAtRecord} CSV records..."
             frozenEnd
         }
         publish()
         exportWorker.execute {
             val result = runCatching { csvStore.exportCsv(output, startingAtRecord, end, frozenFields) }
+            synchronized(lock) { csvStorageBusy = false }
             main.post {
                 result.onSuccess { summary ->
                     val first = summary.firstReceivedAt ?: "unknown"
@@ -481,6 +582,31 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
                 }
                 callback(result)
             }
+        }
+    }
+
+    fun clearCsvHistory() {
+        synchronized(lock) {
+            if (collecting || csvStorageBusy) {
+                status = "Stop recording and wait for CSV storage to finish before clearing history"
+                publish()
+                return
+            }
+            csvStorageBusy = true
+        }
+        publish()
+        exportWorker.execute {
+            val result = runCatching { csvStore.clear() }
+            synchronized(lock) {
+                if (result.isSuccess) {
+                    recorder.stop()
+                    recordingStartCount = 0
+                    recordingStartedAtMs = null
+                }
+                csvStorageBusy = false
+                status = result.fold({ "Recorded measurement history cleared" }, { "Could not clear recorded history: ${it.message}" })
+            }
+            publish()
         }
     }
 
@@ -638,6 +764,8 @@ class DeviceRepository(context: Context, private val changed: (DashboardSnapshot
 
     fun close() {
         closed.set(true)
+        cancelAnchorCoordinates()
+        setupWorker.shutdown()
         main.removeCallbacks(publishLatest)
         workers.shutdownNow(); pollWorkers.shutdownNow(); exportWorker.shutdown()
         synchronized(lock) {

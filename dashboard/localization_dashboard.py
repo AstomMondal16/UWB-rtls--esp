@@ -113,10 +113,13 @@ def trilaterate_2d(measurements):
     ac = sum(a * c for a, _, c in rows)
     bc = sum(b * c for _, b, c in rows)
     determinant = aa * bb - ab * ab
-    if abs(determinant) < 1e-9:
-        raise ValueError("anchor coordinates are collinear")
+    if (not math.isfinite(determinant) or aa <= 0 or bb <= 0 or
+            determinant <= 1e-6 * (aa + bb) ** 2):
+        raise ValueError("anchor coordinates are collinear or too nearly collinear")
     px = (ac * bb - bc * ab) / determinant
     py = (aa * bc - ab * ac) / determinant
+    if not math.isfinite(px) or not math.isfinite(py):
+        raise ValueError("position is not finite")
     residual = math.sqrt(sum(
         (math.hypot(px - x, py - y) - distance) ** 2
         for x, y, distance in measurements) / len(measurements))
@@ -745,7 +748,9 @@ class LocalizationDashboard:
             measurements, used = [], []
             for (anchor_id, tag_id), reading in self.ranges.items():
                 anchor = anchors.get(anchor_id)
-                if tag_id != tag or not anchor or now - reading["time"] > RANGE_MAX_AGE_SECONDS:
+                if (tag_id != tag or not anchor or
+                        not 0 <= now - reading["time"] <= RANGE_MAX_AGE_SECONDS or
+                        not math.isfinite(reading["distance"]) or reading["distance"] <= 0):
                     continue
                 vertical = anchor.get("z", 0) - tag_z
                 horizontal_sq = reading["distance"] ** 2 - vertical ** 2
@@ -755,6 +760,12 @@ class LocalizationDashboard:
                 used.append(anchor_id)
             try:
                 x, y, error = trilaterate_2d(measurements)
+                for anchor_id in used:
+                    anchor = anchors[anchor_id]
+                    distance = self.ranges[anchor_id, tag]["distance"]
+                    expected = math.hypot(x - anchor["x"], y - anchor["y"], tag_z - anchor.get("z", 0))
+                    if not abs(expected - distance) <= max(.20, distance * .05):
+                        raise ValueError("ranges are inconsistent with the position")
                 self.positions[tag] = {"x": x, "y": y, "z": tag_z,
                                        "error": error, "anchors": used, "time": now}
             except ValueError:

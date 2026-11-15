@@ -5,6 +5,11 @@ you want to track. The app uses the anchors' known positions to locate the tag.
 The manufacturer flashes the C firmware and identifies which boards are anchors
 and tags before delivery. Each board creates its secure identity automatically.
 Customers do not handle certificates, fingerprints, MAC addresses or IP settings.
+BLE names use the final Wi-Fi IP octet padded to three digits: `192.168.1.27`
+becomes `UWB_027`. Before the first IP assignment the name is `UWB_000`; later
+sessions use the latest assigned suffix, remembered across restarts. An active
+BLE setup connection keeps its name until it ends. Set up first-use boards one
+at a time if several advertise `UWB_000`.
 
 1. Power on the three anchors and the tag. For the first test, keep them at
    roughly the same height with a clear view between them.
@@ -30,6 +35,12 @@ Customers do not handle certificates, fingerprints, MAC addresses or IP settings
    anchor's position settings. The same-height test plane can use `Z=0`.
    These are examples: use your actual measured distances, not the room's
    approximate dimensions.
+   Alternatively, use **Auto-assign coordinates** in Add Device and review the
+   result before saving. The third automatic Anchor must be in positive X and
+   positive Y; use manual entry for the `(0,3)` example above. Blank Z defaults
+   to zero for anchors sharing a plane. Fourth and later automatic Anchors need
+   three non-collinear saved references. Failed/cancelled ranging restores each
+   device's previous state and leaves manual entry available.
 8. Keep the app connected while the boards synchronize their clocks. The app
    sends phone time automatically when needed; sensors start afterward. Open
    **Dashboard** and move the tag. Its marker and trail should move on the
@@ -41,9 +52,9 @@ same network. Scan again if needed after addresses change. When an anchor is
 moved, update its saved coordinates. Add further anchors or tags using the same
 steps; this example does not fix the system to three anchors and one tag.
 
-The current app uses coordinate fields for anchor placement. A guided room
-wizard, QR setup and automatic anchor surveying are not implemented by the
-HTTPS change. Final physical button/label names must match the shipped enclosure.
+The app supports manual coordinates and automatic ranging-based assignment.
+A guided room wizard and QR setup are not implemented. Final physical
+button/label names must match the shipped enclosure.
 
 If the app reports an unexpected identity change, do not simply dismiss it.
 After an expected board reset only, use Devices > Edit > Pair again, confirm,

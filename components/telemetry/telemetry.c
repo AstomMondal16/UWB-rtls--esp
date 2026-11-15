@@ -23,6 +23,8 @@
 #include "sdkconfig.h"
 #include "dw1000.h"
 #include "device_identity.h"
+#include "device_setup.h"
+#include "uwb_ranging.h"
 
 #define DISCOVERY_PORT 4210
 #define TELEMETRY_MAX_PEERS 8
@@ -37,6 +39,7 @@ typedef struct {
     uint32_t send_interval_ms;
     uint32_t antenna_delay;
     char role[8];
+    uint32_t setup_generation;
     bool imu_enabled;
     bool imu_valid;
     uint32_t imu_sequence;
@@ -65,10 +68,12 @@ static TaskHandle_t collector_task_handle;
 static httpd_handle_t api_server;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static shared_state_t state = {.streaming = true};
+static control_values_t requested_control;
 static char device_mac[18];
 static char device_ip[16];
 static bool clock_synchronized;
 static bool use_phone_clock;
+static bool clock_allowed;
 static SemaphoreHandle_t clock_ready_signal;
 static telemetry_control_callback_t control_callback;
 
@@ -85,6 +90,10 @@ static void collector_task(void *argument)
     for (;;) {
         if (xQueueReceive(samples, &sample, portMAX_DELAY) == pdTRUE) {
             portENTER_CRITICAL(&state_lock);
+            if (sample.setup_generation != state.setup_generation) {
+                portEXIT_CRITICAL(&state_lock);
+                continue;
+            }
             unsigned slot = state.peer_count;
             for (unsigned i = 0; i < state.peer_count; ++i) {
                 if (!memcmp(state.peer_latest[i].peer_id, sample.peer_id, 6)) {
@@ -162,8 +171,12 @@ void telemetry_update_battery(float voltage, float percent)
 bool telemetry_read_snapshot(telemetry_sample_t *sample, char role[8])
 {
     if (!sample || !role) return false;
+    device_setup_snapshot_t setup;
+    device_setup_get(&setup);
     portENTER_CRITICAL(&state_lock);
     *sample = state.latest;
+    bool valid = state.valid && state.setup_generation == setup.generation;
+    if (!valid) memset(sample, 0, sizeof(*sample));
     sample->imu_valid = state.imu_valid;
     memcpy(sample->accel, state.imu_accel, sizeof(sample->accel));
     memcpy(sample->gyro, state.imu_gyro, sizeof(sample->gyro));
@@ -172,7 +185,6 @@ bool telemetry_read_snapshot(telemetry_sample_t *sample, char role[8])
     sample->battery_voltage = state.battery_voltage;
     sample->battery_percent = state.battery_percent;
     strlcpy(role, state.role, 8);
-    bool valid = state.valid;
     portEXIT_CRITICAL(&state_lock);
     return valid;
 }
@@ -193,6 +205,32 @@ bool telemetry_wait_for_clock(uint32_t timeout_ms)
     if (!clock_ready_signal) return false;
     xSemaphoreTake(clock_ready_signal, pdMS_TO_TICKS(timeout_ms));
     return telemetry_clock_unix_ms() > 0;
+}
+
+void telemetry_set_clock_status(bool allowed, bool synchronized, bool phone)
+{
+    portENTER_CRITICAL(&state_lock);
+    clock_allowed = allowed;
+    clock_synchronized = synchronized;
+    use_phone_clock = phone;
+    portEXIT_CRITICAL(&state_lock);
+    if (synchronized && clock_ready_signal) xSemaphoreGive(clock_ready_signal);
+}
+
+void telemetry_set_sensor_state(const char *role, bool streaming, uint32_t period_ms,
+                                uint32_t setup_generation)
+{
+    portENTER_CRITICAL(&state_lock);
+    if (strcmp(state.role, role) || state.setup_generation != setup_generation) {
+        state.peer_count = 0;
+        state.valid = false;
+        memset(&state.latest, 0, sizeof(state.latest));
+    }
+    strlcpy(state.role, role, sizeof(state.role));
+    state.setup_generation = setup_generation;
+    state.streaming = streaming;
+    state.sensing_interval_ms = period_ms;
+    portEXIT_CRITICAL(&state_lock);
 }
 
 /* A single bounded decimal UTC epoch value; no extra keys or trailing content. */
@@ -219,7 +257,14 @@ static bool parse_clock_update(const char *body, int64_t *epoch_ms)
 
 static esp_err_t clock_handler(httpd_req_t *request)
 {
-    if (!use_phone_clock)
+    device_setup_snapshot_t setup;
+    device_setup_get(&setup);
+    portENTER_CRITICAL(&state_lock);
+    bool allowed = clock_allowed, phone = use_phone_clock;
+    portEXIT_CRITICAL(&state_lock);
+    if (!allowed || device_setup_pending(&setup) || setup.active)
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "complete coordinate setup first");
+    if (!phone)
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "clock is synchronized by API/SNTP");
     char content_type[64], body[64];
     if (httpd_req_get_hdr_value_str(request, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
@@ -248,8 +293,15 @@ static esp_err_t clock_handler(httpd_req_t *request)
     return httpd_resp_sendstr(request, "{\"ok\":true}");
 }
 
-static esp_err_t send_telemetry_snapshot(httpd_req_t *request, const shared_state_t *snapshot)
+static esp_err_t send_telemetry_snapshot(httpd_req_t *request, shared_state_t *snapshot)
 {
+    device_setup_snapshot_t setup;
+    device_setup_get(&setup);
+    if (snapshot->setup_generation != setup.generation) {
+        snapshot->valid = false;
+        snapshot->peer_count = 0;
+        memset(&snapshot->latest, 0, sizeof(snapshot->latest));
+    }
 
     char peer[18] = "00:00:00:00:00:00";
     if (snapshot->valid) {
@@ -269,8 +321,11 @@ static esp_err_t send_telemetry_snapshot(httpd_req_t *request, const shared_stat
 #else
     const char *configured_clock_source = "phone";
 #endif
-    const char *clock_source = use_phone_clock ? "phone" : "api";
-    char json[2600];
+    portENTER_CRITICAL(&state_lock);
+    bool allowed = clock_allowed, phone = use_phone_clock;
+    portEXIT_CRITICAL(&state_lock);
+    const char *clock_source = !allowed ? "pending" : phone ? "phone" : "api";
+    char json[3500];
     int length = snprintf(
         json, sizeof(json),
         "{\"configured_clock_source\":\"%s\",\"clock_source\":\"%s\",\"device_time_unix_ms\":%" PRId64 ",\"valid\":%s,\"streaming\":%s,\"sequence\":%" PRIu32
@@ -306,6 +361,20 @@ static esp_err_t send_telemetry_snapshot(httpd_req_t *request, const shared_stat
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "telemetry encoding failed");
     size_t used = (size_t)length;
+    const char *setup_state = setup.active ? "ranging" : device_setup_pending(&setup) ? "coordinates" :
+                              telemetry_clock_unix_ms() ? "ready" : "time";
+    length = snprintf(json + used, sizeof(json) - used,
+        ",\"setup_state\":\"%s\",\"configured\":%s,\"configured_role\":\"%s\","
+        "\"coordinates_valid\":%s,\"x\":%.17g,\"y\":%.17g,\"z\":%.17g,"
+        "\"setup_id\":\"%s\",\"setup_generation\":%" PRIu32 ",\"setup_ready\":%s",
+        setup_state, setup.config.configured ? "true" : "false", setup.config.role,
+        setup.config.coordinates_valid ? "true" : "false", setup.config.x, setup.config.y, setup.config.z,
+        setup.active ? setup.id : "", setup.generation,
+        setup.active && snapshot->setup_generation == setup.generation &&
+        uwb_ranging_setup_generation() == setup.generation && !strcmp(snapshot->role, setup.role) ? "true" : "false");
+    if (length < 0 || (size_t)length >= sizeof(json) - used)
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "setup encoding failed");
+    used += (size_t)length;
     length = snprintf(json + used, sizeof(json) - used, ",\"ranges\":[");
     if (length < 0 || (size_t)length >= sizeof(json) - used)
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -450,6 +519,12 @@ static bool parse_control(const char *body, control_values_t *updated)
 
 static esp_err_t control_handler(httpd_req_t *request)
 {
+    device_setup_snapshot_t setup;
+    device_setup_get(&setup);
+    if (setup.active) {
+        httpd_resp_set_status(request, "409 Conflict");
+        return httpd_resp_sendstr(request, "coordinate ranging session is active");
+    }
     /* Desktop clients already use JSON. Reject browser form/text requests;
      * this blocks simple cross-origin POSTs but is not authentication. */
     char content_type[64];
@@ -474,22 +549,15 @@ static esp_err_t control_handler(httpd_req_t *request)
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid control body");
     control_values_t updated;
     portENTER_CRITICAL(&state_lock);
-    updated.streaming = state.streaming;
-    updated.sensing_interval_ms = state.sensing_interval_ms;
-    updated.send_interval_ms = state.send_interval_ms;
-    updated.antenna_delay = state.antenna_delay;
-    memcpy(updated.role, state.role, sizeof(updated.role));
+    updated = requested_control;
     portEXIT_CRITICAL(&state_lock);
     if (!parse_control(body, &updated))
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
                                    "invalid control fields or values");
     portENTER_CRITICAL(&state_lock);
-    if (strcmp(state.role, updated.role)) state.peer_count = 0;
-    state.streaming = updated.streaming;
-    state.sensing_interval_ms = updated.sensing_interval_ms;
+    requested_control = updated;
     state.send_interval_ms = updated.send_interval_ms;
     state.antenna_delay = updated.antenna_delay;
-    strlcpy(state.role, updated.role, sizeof(state.role));
     portEXIT_CRITICAL(&state_lock);
     if (control_callback)
         control_callback(updated.streaming, updated.sensing_interval_ms,
@@ -506,6 +574,46 @@ static esp_err_t control_handler(httpd_req_t *request)
              updated.sensing_interval_ms, updated.send_interval_ms,
              updated.antenna_delay, updated.role);
     return httpd_resp_sendstr(request, response);
+}
+
+static esp_err_t setup_handler(httpd_req_t *request)
+{
+    char content_type[64], body[513];
+    if (httpd_req_get_hdr_value_str(request, "Content-Type", content_type, sizeof(content_type)) != ESP_OK ||
+        strncasecmp(content_type, "application/json", 16) || (content_type[16] && content_type[16] != ';') ||
+        request->content_len <= 0 || request->content_len >= sizeof(body))
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid setup request");
+    size_t used = 0;
+    while (used < request->content_len) {
+        int count = httpd_req_recv(request, body + used, request->content_len - used);
+        if (count <= 0) return ESP_FAIL;
+        used += count;
+    }
+    body[used] = 0;
+    device_setup_snapshot_t before, after;
+    device_setup_get(&before);
+    esp_err_t err = strlen(body) == used ? device_setup_execute(body) : ESP_ERR_INVALID_ARG;
+    if (err == ESP_ERR_INVALID_ARG)
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid setup fields");
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(request, "409 Conflict");
+        return httpd_resp_sendstr(request, "setup session belongs to another operation or has expired");
+    }
+    if (err != ESP_OK)
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "could not save device configuration");
+    device_setup_get(&after);
+    if (after.config_revision != before.config_revision) {
+        portENTER_CRITICAL(&state_lock);
+        strlcpy(requested_control.role, after.config.role, sizeof(requested_control.role));
+        control_values_t updated = requested_control;
+        portEXIT_CRITICAL(&state_lock);
+        if (control_callback)
+            control_callback(updated.streaming, updated.sensing_interval_ms,
+                updated.send_interval_ms, (uint16_t)updated.antenna_delay, updated.role);
+    }
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(request, "{\"ok\":true}");
 }
 
 char *telemetry_copy_cir_json(bool *capture_valid)
@@ -657,9 +765,15 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
     state.sensing_interval_ms = config->sensing_interval_ms;
     state.send_interval_ms = config->send_interval_ms;
     state.antenna_delay = config->antenna_delay;
+    requested_control = (control_values_t) {
+        .streaming = true, .sensing_interval_ms = config->sensing_interval_ms,
+        .send_interval_ms = config->send_interval_ms, .antenna_delay = config->antenna_delay,
+    };
+    strlcpy(requested_control.role, config->role, sizeof(requested_control.role));
     control_callback = config->on_control;
     clock_synchronized = config->clock_synchronized;
-    use_phone_clock = !config->clock_synchronized;
+    use_phone_clock = false;
+    clock_allowed = config->clock_synchronized;
     clock_ready_signal = xSemaphoreCreateBinary();
     if (!clock_ready_signal) return ESP_ERR_NO_MEM;
     esp_err_t err = ESP_ERR_NO_MEM;
@@ -679,7 +793,7 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
     https_config.httpd.core_id = network_core();
     https_config.httpd.stack_size = 12288;
     https_config.httpd.lru_purge_enable = true;
-    https_config.httpd.max_uri_handlers = 4;
+    https_config.httpd.max_uri_handlers = 5;
     device_identity_t identity;
     err = device_identity_load(device_mac, &identity);
     if (err != ESP_OK) {
@@ -700,7 +814,7 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
     http_config.core_id = network_core();
     http_config.stack_size = 8192;
     http_config.lru_purge_enable = true;
-    http_config.max_uri_handlers = 4;
+    http_config.max_uri_handlers = 5;
     err = httpd_start(&api_server, &http_config);
 #endif
     if (err != ESP_OK) {
@@ -733,6 +847,8 @@ esp_err_t telemetry_start(const telemetry_config_t *config)
     if (err != ESP_OK) goto fail;
     err = httpd_register_uri_handler(api_server, &cir_uri);
     if (err == ESP_OK) err = httpd_register_uri_handler(api_server, &clock_uri);
+    const httpd_uri_t setup_uri = {.uri = "/api/setup", .method = HTTP_POST, .handler = setup_handler};
+    if (err == ESP_OK) err = httpd_register_uri_handler(api_server, &setup_uri);
     if (err != ESP_OK) goto fail;
     if (xTaskCreatePinnedToCore(discovery_task, "mac_discovery", 3072, NULL,
                                 3, NULL, network_core()) != pdPASS)

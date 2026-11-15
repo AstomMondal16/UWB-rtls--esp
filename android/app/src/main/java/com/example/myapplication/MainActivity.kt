@@ -835,6 +835,7 @@ private fun DashboardApp(
                         repo.setCollecting(false)
                         onSaveCsv("session", 0, repo.snapshot().collected)
                     },
+                    onClearCsv = repo::clearCsvHistory,
                     onRefresh = repo::refreshNow,
                     onDeviceSelected = { selectedKey = it },
                     onApplyDevice = { device, body, completed ->
@@ -898,7 +899,7 @@ private fun DashboardApp(
                                         label = if (snapshot.collecting) "Stop CSV" else "Record CSV", icon = if (snapshot.collecting) "stop" else "record",
                                         active = snapshot.collecting, recording = snapshot.collecting, accent = Positive,
                                         enabled = snapshot.collecting ||
-                                            (snapshot.devices.isNotEmpty() && !snapshot.status.startsWith("Exporting")),
+                                            (snapshot.devices.isNotEmpty() && !snapshot.csvStorageBusy),
                                         modifier = Modifier.widthIn(min = minimumActionWidth).weight(1f)
                                     ) {
                                         if (snapshot.collecting) {
@@ -1088,6 +1089,7 @@ private fun DashboardApp(
         }) { Text("Start calibration") } },
         dismissButton = { TextButton(onClick = { calibrationConfirm = false }) { Text("Cancel") } })
     if (editorOpen) DeviceEditorDialog(editing,
+        repo = repo, isNew = editing == null || snapshot.devices.none { it.key == editing?.key },
         initialSecurity = LastWifiCredentialStore.loadDeviceSecurity(context,
             editing?.let { it.mac.ifBlank { it.ip } }.orEmpty()),
         onDismiss = { editorOpen = false; configOpen = true }, onSave = { record, security ->
@@ -1334,6 +1336,7 @@ private fun SettingsPage(
     onResetStorage: () -> Unit,
     onOpenStorage: () -> Unit,
     onExportAll: () -> Unit,
+    onClearCsv: () -> Unit,
     onRefresh: () -> Unit,
     onDeviceSelected: (String) -> Unit,
     onApplyDevice: (DeviceRecord, JSONObject, (String) -> Unit) -> Unit
@@ -1383,7 +1386,8 @@ private fun SettingsPage(
                         0 -> PreferencesPage(preferences, onPreferencesChanged)
                         1 -> StoragePage(storageFolder, folderPath, csvFields, onCsvFieldsChanged,
                             onPickStorage, onResetStorage, onOpenStorage,
-                            snapshot.collected, !snapshot.status.startsWith("Exporting"), onExportAll)
+                            snapshot.collected, !snapshot.csvStorageBusy, onExportAll,
+                            !snapshot.collecting && !snapshot.csvStorageBusy, onClearCsv)
                         2 -> AboutPage(chosen)
                         else -> DevicePropertiesPage(snapshot, names, chosen, chosenIp, sample, cirData, onRefresh,
                             onApplyDevice, onDeviceSelected, preferences.reduceAnimations)
@@ -1590,7 +1594,9 @@ private fun SettingsSwitch(title: String, detail: String, checked: Boolean, enab
 private fun StoragePage(folder: Uri?, folderPath: String?, csvFields: List<String>,
                        onCsvFieldsChanged: (List<String>) -> Unit,
                        onBrowse: () -> Unit, onReset: () -> Unit, onOpen: () -> Unit,
-                       storedRecords: Int, exportEnabled: Boolean, onExportAll: () -> Unit) {
+                       storedRecords: Int, exportEnabled: Boolean, onExportAll: () -> Unit,
+                       clearEnabled: Boolean, onClearCsv: () -> Unit) {
+    var clearConfirm by remember { mutableStateOf(false) }
     SettingsHeading("CSV exports", "Keep your recorded measurements together.")
     SettingsGroup {
         Text("Save location", color = Ink, style = MaterialTheme.typography.titleSmall)
@@ -1608,6 +1614,14 @@ private fun StoragePage(folder: Uri?, folderPath: String?, csvFields: List<Strin
     }
     Text("$storedRecords stored records, including earlier sessions. Exporting stops an active recording.",
         color = Muted, style = MaterialTheme.typography.bodySmall)
+    TextButton(onClick = { clearConfirm = true }, enabled = clearEnabled && storedRecords > 0) {
+        Text("Clear recorded history", color = if (clearEnabled) Danger else Muted)
+    }
+    if (clearConfirm) AlertDialog(onDismissRequest = { clearConfirm = false },
+        title = { Text("Clear recorded history?") },
+        text = { Text("Export recordings you want to keep first. This deletes locally recorded measurements, including unexported ones. Saved devices and paths stay available.") },
+        confirmButton = { TextButton(enabled = clearEnabled, onClick = { clearConfirm = false; onClearCsv() }) { Text("Clear history", color = Danger) } },
+        dismissButton = { TextButton(onClick = { clearConfirm = false }) { Text("Cancel") } })
 }
 
 @Composable
@@ -2880,6 +2894,7 @@ private fun SectionCard(title: String, headerAction: (@Composable () -> Unit)? =
 
 @Composable
 private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
+                               repo: DeviceRepository, isNew: Boolean,
                                initialSecurity: DeviceSecurity,
                                onSave: (DeviceRecord, DeviceSecurity) -> Unit) {
     var mac by remember(device) { mutableStateOf(device?.mac.orEmpty()) }
@@ -2893,27 +2908,70 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
     var resetTrust by remember(device) { mutableStateOf(false) }
     var confirmTrustReset by remember(device) { mutableStateOf(false) }
     var error by remember { mutableStateOf(initialSecurity.loadError) }
+    var assigning by remember { mutableStateOf(false) }
+    var assignmentStatus by remember { mutableStateOf("") }
+    var editorAlive by remember { mutableStateOf(true) }
+    DisposableEffect(Unit) {
+        onDispose { editorAlive = false; repo.cancelAnchorCoordinates() }
+    }
     fun record(): DeviceRecord? {
-        val values = listOf(x.toDoubleOrNull(), y.toDoubleOrNull(), z.toDoubleOrNull(), yaw.toDoubleOrNull())
-        if (values.any { it == null }) { error = "Enter valid numeric coordinates"; return null }
+        val values = listOf(x.toDoubleOrNull(), y.toDoubleOrNull(), coordinateZ(z), yaw.toDoubleOrNull())
+        if (values.any { it == null || !it.isFinite() }) { error = "Enter valid numeric coordinates; blank Z defaults to zero"; return null }
         return DeviceRecord(mac, ip, role, values[0]!!, values[1]!!, values[2]!!, values[3]!!)
     }
     AlertDialog(onDismissRequest = onDismiss,
-        title = { Text(if (device == null) "Add UWB device" else "Edit UWB device") },
+        title = { Text(if (isNew) "Add Device" else "Edit UWB device") },
         text = {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(mac, { mac = it }, label = { Text("MAC address") }, shape = MaterialTheme.shapes.small, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(ip, { ip = it }, label = { Text("IPv4 address") }, shape = MaterialTheme.shapes.small, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                OutlinedTextField(mac, { mac = it }, enabled = !assigning, label = { Text("MAC address") }, shape = MaterialTheme.shapes.small, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(ip, { ip = it }, enabled = !assigning, label = { Text("IPv4 address") }, shape = MaterialTheme.shapes.small, singleLine = true, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                 Text("Device role", color = Ink, style = MaterialTheme.typography.titleSmall)
-                PreferenceChoices(listOf("anchor", "tag"), role) { role = it }
+                if (assigning) Text("Ranging to saved anchors", style = MaterialTheme.typography.bodySmall)
+                else PreferenceChoices(listOf("anchor", "tag"), role) { role = it }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    NumericField("X (m)", x, { x = it }, Modifier.weight(1f))
-                    NumericField("Y (m)", y, { y = it }, Modifier.weight(1f))
+                    NumericField("X (m)", x, { x = it }, Modifier.weight(1f), enabled = !assigning)
+                    NumericField("Y (m)", y, { y = it }, Modifier.weight(1f), enabled = !assigning)
+                }
+                if (isNew || role == "tag") {
+                    OutlinedButton(onClick = {
+                        if (assigning) {
+                            repo.cancelAnchorCoordinates()
+                            assignmentStatus = "Ending temporary ranging…"
+                        } else {
+                            val height = coordinateZ(z)
+                            if (height == null) { error = "Enter a valid Z coordinate or leave it blank for zero"; return@OutlinedButton }
+                            if (resetTrust || tlsFingerprint != initialSecurity.tlsFingerprint) {
+                                error = "Save pairing changes first, or enter coordinates manually"; return@OutlinedButton
+                            }
+                            error = ""
+                            assigning = true
+                            assignmentStatus = "Preparing coordinate assignment…"
+                            repo.autoAssignCoordinates(DeviceRecord(mac, ip, role, z = height),
+                                progress = { if (editorAlive) assignmentStatus = it },
+                                callback = { position, message ->
+                                    if (editorAlive) {
+                                        assigning = false
+                                        assignmentStatus = ""
+                                        if (position != null) {
+                                            x = position.first.toString(); y = position.second.toString()
+                                            if (z.isBlank()) z = "0"
+                                        }
+                                        error = message.orEmpty()
+                                    }
+                                })
+                        }
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (assigning) "Cancel ranging" else "Auto-assign coordinates")
+                    }
+                    if (assignmentStatus.isNotBlank()) Text(assignmentStatus, style = MaterialTheme.typography.bodySmall, color = Muted)
+                    if (role == "tag") Text("Automatic assignment needs at least three saved anchors that are not in a straight line.",
+                        style = MaterialTheme.typography.bodySmall, color = Muted)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    NumericField("Z (m)", z, { z = it }, Modifier.weight(1f))
-                    NumericField("Yaw offset°", yaw, { yaw = it }, Modifier.weight(1f))
+                    NumericField("Z (m)", z, { z = it }, Modifier.weight(1f), enabled = !assigning)
+                    NumericField("Yaw offset°", yaw, { yaw = it }, Modifier.weight(1f), enabled = !assigning)
                 }
+                Text("Blank Z uses 0 m. Leave Z blank for anchors on the same plane.", style = MaterialTheme.typography.bodySmall, color = Muted)
                 Text("HTTPS pairs automatically on first use. Add devices only on your trusted private Wi-Fi. Later identity changes are blocked.", style = MaterialTheme.typography.bodySmall, color = Muted)
                 Text(if (resetTrust || initialSecurity.trustedPublicKeyPin.isBlank()) "Secure pairing: not paired yet" else "Secure pairing: identity saved",
                     style = MaterialTheme.typography.bodySmall, color = Muted)
@@ -2927,14 +2985,14 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
                 if (error.isNotBlank()) Text(error, color = Danger, fontSize = 12.sp)
             }
         },
-        confirmButton = { TextButton(onClick = {
+        confirmButton = { TextButton(enabled = !assigning, onClick = {
             val fingerprint = tlsFingerprint.filterNot { it == ':' || it.isWhitespace() }
             if (fingerprint.isNotBlank() && (fingerprint.length != 64 || fingerprint.any { it.digitToIntOrNull(16) == null })) {
                 error = "Fingerprint must be blank or 64 hexadecimal characters"; return@TextButton
             }
             record()?.let { onSave(it, DeviceSecurity(fingerprint.uppercase(Locale.ROOT), requireHttps = true,
                 trustedPublicKeyPin = initialSecurity.trustedPublicKeyPin, resetTrust = resetTrust)) }
-        }) { Text("Save") } },
+        }) { Text(if (isNew) "Add Device" else "Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
     if (confirmTrustReset) AlertDialog(onDismissRequest = { confirmTrustReset = false },
         title = { Text("Pair this device again?") },
@@ -2944,8 +3002,8 @@ private fun DeviceEditorDialog(device: DeviceRecord?, onDismiss: () -> Unit,
 }
 
 @Composable
-private fun NumericField(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier) {
-    OutlinedTextField(value, onChange, label = { Text(label, fontSize = 14.sp) }, modifier = modifier,
+private fun NumericField(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
+    OutlinedTextField(value, onChange, enabled = enabled, label = { Text(label, fontSize = 14.sp) }, modifier = modifier,
         shape = MaterialTheme.shapes.small, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
 }
 

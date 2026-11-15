@@ -7,8 +7,12 @@ identity, CSV fields, map trails and Pause/Play behavior are retained.
 Power on
   Wi-Fi: saved credentials, then optional first-boot menuconfig credentials
     no credentials -> BLE setup -> receive/test/save credentials -> Wi-Fi
+  Start HTTPS API and UDP discovery
+  First use: confirm role and coordinates in Android Add Device
+    manual entry or temporary tag/anchor ranging; blank Z -> 0 metres
+    saved valid configuration -> skip coordinate setup
   Time sync: Time.Now/SNTP or phone/computer clock
-  Initialize enabled sensors
+  Initialize remaining enabled sensors
   Allow 1 second for sensor settling
   Start anchor/tag ranging and live telemetry
 
@@ -26,14 +30,80 @@ The app shows success only after that confirmation. A Bluetooth disconnect or
 two-minute confirmation timeout clears the spinner and suggests checking Scan
 network; it does not claim success merely because the board may be online.
 
-In phone-clock mode, add/connect the board in the Android app or a desktop
-dashboard to send time automatically. In API mode, five HTTPS attempts are
+On first use, add the board in Android before supplying time. Android restores
+existing saved device maps to firmware automatically on reconnect. Confirmed
+roles and coordinates live in the `device_setup/config` NVS blob; an Anchor
+without valid coordinates remains in setup, while a confirmed Tag skips them.
+Offline manual app entries are synchronized when the device becomes reachable.
+
+In phone-clock mode, the Android app or a desktop dashboard sends time
+automatically after configuration. In API mode, five HTTPS attempts are
 separated by five seconds; SNTP then gets up to ten seconds. If both fail, the
 same phone/computer path is used. The local API and discovery are running while
-waiting, but UWB, IMU, battery initialization and terminal sample rows do not
-start until valid calendar time arrives. Waiting without a client is deliberate,
+waiting. Normal sensing and terminal rows wait for calendar time, but automatic
+coordinate assignment can initialize sensors and run UWB before time sync.
+Ranging uses DW1000 timestamps and monotonic uptime, not calendar time. Waiting
+without a client is deliberate,
 not a scheduler deadlock. The clock remains set across a Wi-Fi change while the
 board stays powered; power loss requires synchronization again.
+
+## Coordinate setup sessions
+
+Android's **Auto-assign coordinates** previews X/Y without storing them. The
+first Anchor uses `(0,0)` with no ranging. The second defines positive X from
+the origin range; the third uses both ranges and the positive-Y solution.
+Later Anchors use three or more non-collinear references and all additional
+valid ranges collected. Existing coordinates are never moved or re-framed.
+Tags support the same preview in Add/Edit Device, always requiring at least
+three non-collinear saved Anchors. A Tag never establishes an origin or axis.
+The candidate remains a Tag; its reference devices use temporary Anchor leases.
+Confirmed Tag coordinates are synchronized and saved in NVS, but coordinates
+remain optional for ordinary Tag startup. Live tracking is unchanged.
+Blank Z defaults to zero; explicit heights compensate the horizontal ranges.
+Automatic positions must lie in 0–1,000 metres on each axis, and each 3D range
+residual must be within `max(0.20 m, 5% of that range)`. Manual entry retains
+its existing finite-number behavior.
+
+`POST /api/setup` accepts flat JSON (maximum 512 bytes):
+
+- `{"action":"commit","role":"anchor","x":0,"y":0,"z":0}` saves the
+  confirmed configuration atomically in NVS. A Tag only requires its role.
+- `begin` requires a 32-character hex `id`, `role`, and `peers`: a comma-separated
+  list of up to eight MACs. It temporarily overrides role and sensing period.
+- `renew` and `end` require that `id`. A 15-second monotonic lease expires even
+  without radio/HTTP traffic; Wi-Fi loss ends it as well. Android renews every
+  five seconds, limits an attempt to 60 seconds, and ends every attempted lease
+  on success, failure, cancellation or dismissal. Larger reference sets use batches.
+
+References accept the candidate's discovery frames; the candidate accepts only
+the selected references. Radio packet layouts remain unchanged. Setup generation
+tags reject queued samples from earlier roles/sessions. Telemetry exposes
+`setup_state`, saved configuration, `setup_id`, `setup_generation`, and
+`setup_ready`. Clients wait for readiness and five fresh distinct ranges per
+reference. Setup data is excluded from normal app trails and recordings.
+Competing setup/control requests receive HTTP 409. Invalid bodies receive 400;
+failed NVS writes receive 500 and retain the previous in-memory configuration.
+Requested controls are stored separately from temporary effective settings.
+Partial controls immediately after setup retain the requested role, pause and
+rate. A configuration commit updates the requested role before acknowledging;
+the supervisor applies the latest requested interval when setup ends. Cached
+setup ranges are invalidated before they can appear as normal telemetry.
+
+`clock_source` is `pending` before configuration. Phone time updates are rejected
+until the coordinate step is complete/skipped and no setup lease is active.
+The supervisor remains live during network time requests and clock waiting, so
+leases still expire. Missing time cannot put initialized UWB/IMU chips to sleep
+while coordinates are pending or a setup session is active. Setup ends by
+restoring the previous monitoring request, role and sensing interval; regular
+Pause/Play and Wi-Fi sleep behavior then resumes.
+
+Anchors retain independent identity, activity and sequence state for up to eight
+Tags; an additional Tag replaces the least recently active entry. This avoids
+requiring rediscovery whenever another Tag ranges. Exchanges remain sequential,
+so simultaneous radio collisions still require retry. Fatal driver errors and
+eight repeated local RX/TX failures leave the ranging loop, clean up the driver
+and enter the existing main-task reinitialization/backoff. Packet loss, ordinary
+receive timeouts and oversized unrelated frames do not force reinitialization.
 
 IMU bus/device initialization happens before starting its sampling task. The
 owner task performs calibration and handles later retries and sleep/wake. A
@@ -42,6 +112,32 @@ running. After radio initialization completes, a one-second settling delay
 precedes the first ranging loop. It yields in 50 ms slices with BLE checkpoints,
 so GPIO17 requests remain responsive. A full radio reinitialization repeats the
 delay; ordinary Pause/Play wake cycles do not add this startup delay.
+
+## ROM download mode versus firmware startup
+
+The reported Tag log contains `rst:0x15 (USB_UART_CHIP_RESET)`,
+`boot:0x0 (DOWNLOAD(USB/UART0))`, and `waiting for download`. This is the ROM
+loader, before the application selects Anchor/Tag roles or initializes Wi-Fi,
+UWB or IMU. An application change cannot run while the chip remains there.
+The Anchor can run the same source while a different board/USB connection
+enters a different boot mode. The exact reset/strapping cause requires hardware
+verification; see [Espressif's ESP32-S3 boot-mode guide](https://docs.espressif.com/projects/esptool/en/latest/esp32s3/advanced-topics/boot-mode-selection.html).
+
+The workspace sets `idf.monitorNoReset: true`, supported by the installed
+ESP-IDF extension. This suppresses the monitor's automatic startup reset;
+it does not change flashing, ports, firmware, or reset strapping. For a manual
+Tag monitor using the port shown in the supplied log:
+
+```powershell
+& 'C:\Espressif\tools\python\v6.0.1\venv\Scripts\python.exe' 'C:\esp\v6.0.1\esp-idf\tools\idf_monitor.py' --no-reset -p COM7 -b 115200 --target esp32s3 build\pcb_v1.elf
+```
+
+This command is documented, not executed by the checks. Close any other monitor
+that owns the port. If already in download mode, release BOOT and reset once;
+no-reset monitoring does not itself leave the ROM loader. If download mode also
+occurs on power-up without a monitor, verify the board's BOOT/GPIO0 and EN/reset
+wiring/levels against its schematic. The project's configured UWB/IMU pins do
+not use GPIO0 or GPIO46. See [IDF Monitor's no-reset option](https://docs.espressif.com/projects/esp-idf/en/release-v6.1/esp32s3/api-guides/tools/idf-monitor.html).
 
 ## Scheduling rules
 
@@ -115,18 +211,24 @@ No generated artwork or new UI dependency was needed.
 
 Host tests exercise real C functions with mocked buses/RTOS events, including
 rapid resume/re-pause, lost notifications, timeout with late registration,
-early/late clock signals, and startup refusing to launch sensors before time.
+early/late clock signals, and normal startup waiting for time. Coordinate setup
+tests compile the real setup/ranging C with fake NVS, RTOS and radio I/O; run
+`python tests/firmware/run_tests.py`. Android JVM tests cover the first four
+additions, heights, geometry/fit rejection, batching and cleanup paths.
 Desktop loopback TLS tests use mock servers and test-only certificates.
 UI construction checks use simulated demo data. None of these are a physical
 board, current-draw measurement, phone deployment or visual phone review.
 
 After flashing, test these on hardware:
 
-1. No Wi-Fi credentials: BLE setup appears; sensors wait until Wi-Fi and time.
-2. Saved Wi-Fi plus working API: time synchronization precedes sensor logs.
-3. API unavailable or phone mode: connecting the app/dashboard sends time and
+1. No Wi-Fi credentials: BLE setup appears; first-use devices wait for Add Device.
+2. Add four Anchors, including before time sync; verify measured coordinates,
+   positive-Y selection, cancellation, Wi-Fi loss and temporary role restoration.
+3. Restart saved Anchors/Tags; verify configuration is retained, coordinate setup
+   is skipped, then time sync and normal acquisition resume.
+4. API unavailable or phone mode: connecting the app/dashboard sends time and
    releases startup. Pause/Play still works before and after this transition.
-4. Press GPIO17 repeatedly, finish/change Wi-Fi, disconnect during setup, and
+5. Press GPIO17 repeatedly, finish/change Wi-Fi, disconnect during setup, and
    exercise the BLE timeout. Acquisition must resume only after safe release.
-5. Run multiple tags and full CIR at the intended rates; check reported drops,
+6. Run multiple tags and full CIR at the intended rates; check reported drops,
    free heap and task stack high-water marks over a long session.

@@ -18,6 +18,14 @@ not ESP32 deep sleep. The whole board's current depends on its MCU, regulators,
 LEDs and other loads; no particular board-current reduction is claimed without
 measurement.
 
+Coordinate setup takes precedence over time-related waiting. Uninitialized
+sensors can wait for setup; initialized UWB/IMU chips stay awake while required
+coordinates are pending or temporary ranging is active. The ranging owner idles
+without DEEPSLEEP when acquisition is waiting in that state. Temporary setup
+leases override the acquisition pause, then restore the previous requested
+monitoring state and sensing interval. A monotonic supervisor expires leases
+after 15 seconds without renewal, independently of ranges and time sync.
+
 Power changes run only in each sensor's owning task, at safe transaction
 boundaries. Long sensor delays are interruptible by the control notifications.
 An in-progress ranging exchange or initial gyro calibration may finish before

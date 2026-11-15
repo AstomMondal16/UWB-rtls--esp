@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "telemetry.h"
+#include "device_setup.h"
 #include "uwb_ranging.h"
 #include "wifi.h"
 
@@ -32,6 +33,8 @@ static const char *TAG = "UWB";
 static wifi_info_t network;
 static volatile bool wifi_connected = false;
 static volatile bool monitoring_requested = true;
+static uint32_t requested_sensing_interval_ms = CONFIG_UWB_TAG_PERIOD_MS;
+static volatile bool sensor_sleep_allowed;
 static portMUX_TYPE sensor_control_lock = portMUX_INITIALIZER_UNLOCKED;
 #define BATTERY_LOG_INTERVAL_MS 5000
 #define RANGE_FILTER_COUNT 8
@@ -103,32 +106,23 @@ static void apply_dashboard_control(bool streaming, uint32_t sensing_interval_ms
                                     uint16_t antenna_delay, const char *role)
 {
     /* Sensor chips sleep; Wi-Fi/HTTPS remain available for the Play command. */
+    uwb_ranging_role_t requested_role = !strcmp(role, "anchor")
+                                            ? UWB_RANGING_ANCHOR : UWB_RANGING_TAG;
     portENTER_CRITICAL(&sensor_control_lock);
     monitoring_requested = streaming;
-    uwb_ranging_set_paused(!streaming || !wifi_connected);
-#ifdef CONFIG_UWB_MPU6050_ENABLE
-    imu_streaming = streaming && wifi_connected;
-#endif
+    active_role = requested_role;
+    requested_sensing_interval_ms = sensing_interval_ms;
     portEXIT_CRITICAL(&sensor_control_lock);
-    uwb_ranging_set_period(sensing_interval_ms);
     uwb_ranging_set_antenna_delay(antenna_delay);
     if (antenna_delay != active_antenna_delay) {
         active_antenna_delay = antenna_delay;
         save_antenna_delay(antenna_delay);
     }
-    uwb_ranging_role_t requested_role = !strcmp(role, "anchor")
-                                            ? UWB_RANGING_ANCHOR
-                                            : UWB_RANGING_TAG;
-    if (requested_role != active_role) {
-        active_role = requested_role;
-        uwb_ranging_set_role(active_role);
-        ESP_LOGW(TAG, "UWB role switched to %s", role_name(active_role));
-    }
     sensor_coordinator_notify(SENSOR_COORDINATOR_UWB | SENSOR_COORDINATOR_IMU);
     ESP_LOGI(TAG, "sensors %s (Wi-Fi active) sensing=%" PRIu32 " ms network=%" PRIu32
              " ms antenna_delay=%u role=%s",
              streaming ? "resumed" : "paused", sensing_interval_ms,
-             send_interval_ms, antenna_delay, role_name(active_role));
+             send_interval_ms, antenna_delay, role_name(requested_role));
 }
 
 #ifdef CONFIG_UWB_MPU6050_ENABLE
@@ -191,7 +185,7 @@ static void imu_sampling_task(void *argument)
             }
             sleeping = calibrated = false;
         }
-        if (!imu_streaming) {
+        if (!imu_streaming && sensor_sleep_allowed) {
             if (imu && !sleeping) {
                 esp_err_t err = mpu6050_set_sleep(imu, true);
                 if (err != ESP_OK) {
@@ -213,6 +207,10 @@ static void imu_sampling_task(void *argument)
                 continue;
             }
             sleeping = false;
+        }
+        if (!imu_streaming) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+            continue;
         }
         if (!calibrated) {
             ESP_LOGI(TAG, "Keep MPU6050 still in any orientation: calibrating gyro");
@@ -378,9 +376,15 @@ static float median_range(range_filter_t *filter, float value)
 
 static void on_range(const uwb_ranging_peer_t *peer)
 {
+    static uint32_t filter_generation;
+    if (filter_generation != peer->setup_generation) {
+        memset(range_filters, 0, sizeof(range_filters));
+        filter_generation = peer->setup_generation;
+    }
     range_filter_t *filter = filter_for_peer(peer->device_id);
     telemetry_sample_t sample = {
         .timestamp_ms = esp_timer_get_time() / 1000,
+        .setup_generation = peer->setup_generation,
         .distance_m = median_range(filter, peer->range_m),
         .rx_power_dbm = peer->rx_power_dbm,
     };
@@ -411,10 +415,6 @@ static void on_wifi_connection_changed(bool connected, void *arg)
     (void)arg;
     portENTER_CRITICAL(&sensor_control_lock);
     wifi_connected = connected;
-    uwb_ranging_set_paused(!connected || !monitoring_requested);
-#ifdef CONFIG_UWB_MPU6050_ENABLE
-    imu_streaming = connected && monitoring_requested;
-#endif
     portEXIT_CRITICAL(&sensor_control_lock);
     sensor_coordinator_notify(SENSOR_COORDINATOR_UWB | SENSOR_COORDINATOR_IMU);
     ESP_LOGI(TAG, "Wi-Fi %s; sensor acquisition %s",
@@ -608,6 +608,12 @@ static void csv_serial_task(void *argument)
     (void)argument;
     bool pause_reported = false;
     for (;;) {
+        device_setup_snapshot_t setup;
+        device_setup_get(&setup);
+        if (setup.active || device_setup_pending(&setup)) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
         if (!monitoring_requested) {
             if (!pause_reported) {
                 ESP_LOGW(TAG, "Device is paused: UWB deep sleep, IMU sleep mode.\n");
@@ -651,6 +657,58 @@ static void csv_serial_task(void *argument)
     }
 }
 
+static void setup_supervisor_task(void *argument)
+{
+    (void)argument;
+    bool sensors_started = false;
+    bool previous_running = false, previous_sleep = false;
+    uint32_t previous_generation = UINT32_MAX;
+    uwb_ranging_role_t previous_role = active_role;
+    for (;;) {
+        device_setup_tick(wifi_connected);
+        device_setup_snapshot_t setup;
+        device_setup_get(&setup);
+        portENTER_CRITICAL(&sensor_control_lock);
+        uwb_ranging_role_t desired_role = active_role;
+        bool monitoring = monitoring_requested;
+        uint32_t desired_period = requested_sensing_interval_ms;
+        bool connected = wifi_connected;
+        portEXIT_CRITICAL(&sensor_control_lock);
+        bool pending = device_setup_pending(&setup);
+        bool normal_ready = !pending && telemetry_clock_unix_ms() > 0;
+        uwb_ranging_role_t role = setup.active
+            ? (!strcmp(setup.role, "anchor") ? UWB_RANGING_ANCHOR : UWB_RANGING_TAG) : desired_role;
+        uwb_ranging_set_period(setup.active ? 100 : desired_period);
+        device_setup_sensor_policy_t policy = device_setup_sensor_policy(&setup, connected,
+            telemetry_clock_unix_ms() > 0, monitoring);
+        bool running = policy.running;
+        sensor_sleep_allowed = policy.sleep_allowed;
+        uwb_ranging_set_sleep_allowed(sensor_sleep_allowed);
+        uwb_ranging_set_role(role);
+        uwb_ranging_set_setup(setup.generation, setup.peers, setup.peer_count);
+        telemetry_set_sensor_state(role_name(role), setup.active || monitoring,
+                                   uwb_ranging_get_period(), setup.generation);
+        uwb_ranging_set_paused(!running);
+#ifdef CONFIG_UWB_MPU6050_ENABLE
+        imu_streaming = running;
+#endif
+        if (running != previous_running || sensor_sleep_allowed != previous_sleep ||
+            setup.generation != previous_generation || role != previous_role) {
+            sensor_coordinator_notify(SENSOR_COORDINATOR_UWB | SENSOR_COORDINATOR_IMU);
+            previous_running = running;
+            previous_sleep = sensor_sleep_allowed;
+            previous_generation = setup.generation;
+            previous_role = role;
+        }
+        if (!sensors_started && connected && (setup.active || normal_ready) && !sensor_coordinator_ble_active()) {
+            if (xTaskCreatePinnedToCore(sensing_task, "uwb_imu_sensing", 8192, NULL, 5, NULL,
+                    portNUM_PROCESSORS > 1 ? 1 : tskNO_AFFINITY) == pdPASS) sensors_started = true;
+            else ESP_LOGE(TAG, "could not start sensing task; retrying");
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "startup: connecting Wi-Fi; GPIO17 opens Bluetooth setup");
@@ -661,14 +719,12 @@ void app_main(void)
         ESP_LOGE(TAG, "Wi-Fi connection failed: %s", esp_err_to_name(err));
         return;
     }
-    bool clock_ready = false;
-    ESP_LOGI(TAG, "startup: synchronizing clock");
-#ifdef CONFIG_UWB_TIME_SOURCE_API
-    clock_ready = time_sync_startup() == ESP_OK;
-    if (!clock_ready) ESP_LOGW(TAG, "API and SNTP failed; requesting phone/computer clock fallback");
-#endif
+    ESP_ERROR_CHECK(device_setup_init(role_name(active_role)));
+    device_setup_snapshot_t setup;
+    device_setup_get(&setup);
+    active_role = !strcmp(setup.config.role, "anchor") ? UWB_RANGING_ANCHOR : UWB_RANGING_TAG;
     load_antenna_delay();
-    ESP_LOGW(TAG, "startup role=%s (menuconfig; dashboard changes are runtime only)",
+    ESP_LOGW(TAG, "startup role=%s (saved configuration, or menuconfig before first setup)",
              role_name(active_role));
     ESP_LOGW(TAG, "identity timestamp=%lld ms MAC=%02X:%02X:%02X:%02X:%02X:%02X IP=%s",
              esp_timer_get_time() / 1000, network.mac[0], network.mac[1],
@@ -683,7 +739,7 @@ void app_main(void)
         .send_interval_ms = CONFIG_UWB_TELEMETRY_SEND_INTERVAL_MS,
         .antenna_delay = active_antenna_delay,
         .on_control = apply_dashboard_control,
-        .clock_synchronized = clock_ready,
+        .clock_synchronized = false,
     };
     memcpy(telemetry_config.device_id, network.mac, sizeof(network.mac));
     err = telemetry_start(&telemetry_config);
@@ -691,6 +747,23 @@ void app_main(void)
         ESP_LOGE(TAG, "startup stopped: dashboard API unavailable: %s", esp_err_to_name(err));
         return;
     }
+    if (xTaskCreate(setup_supervisor_task, "setup_supervisor", 4096, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "startup stopped: could not start setup supervisor");
+        return;
+    }
+    ESP_LOGI(TAG, "startup: waiting for confirmed role and required coordinates");
+    do {
+        device_setup_get(&setup);
+        if (!device_setup_pending(&setup) && !setup.active) break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    } while (true);
+    bool clock_ready = false;
+    ESP_LOGI(TAG, "startup: coordinate step complete; synchronizing clock");
+    telemetry_set_clock_status(true, false, false);
+#ifdef CONFIG_UWB_TIME_SOURCE_API
+    clock_ready = time_sync_startup() == ESP_OK;
+#endif
+    telemetry_set_clock_status(true, clock_ready, !clock_ready);
     if (!clock_ready) ESP_LOGI(TAG, "waiting for phone/computer time; connect the app or dashboard");
     while (!telemetry_wait_for_clock(1000)) {}
     while (!wifi_connected || sensor_coordinator_ble_active()) vTaskDelay(pdMS_TO_TICKS(100));
@@ -699,8 +772,4 @@ void app_main(void)
                                     1, NULL, portNUM_PROCESSORS > 1 ? 0 : tskNO_AFFINITY) != pdPASS)
         ESP_LOGW(TAG, "CSV-style serial output unavailable");
 
-    BaseType_t sensing_core = portNUM_PROCESSORS > 1 ? 1 : tskNO_AFFINITY;
-    if (xTaskCreatePinnedToCore(sensing_task, "uwb_imu_sensing", 8192, NULL,
-                                5, NULL, sensing_core) != pdPASS)
-        ESP_LOGE(TAG, "could not start sensing task");
 }
